@@ -1,0 +1,10 @@
+{
+  "name": "findb-engine",
+  "version": "1.0.0",
+  "description": "FinDB Processing Engine",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {}
+}
