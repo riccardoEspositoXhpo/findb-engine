@@ -1,0 +1,34 @@
+name: Deploy FinDB Engine to Cloud Run Jobs
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  PROJECT_ID: findb-engine
+  REGION: europe-west1
+  JOB_NAME: findb-nitejob
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy Cloud Run Job from GitHub Repo
+        run: |
+          gcloud run jobs deploy ${{ env.JOB_NAME }} \
+            --source . \
+            --region ${{ env.REGION }} \
+            --max-retries 1 \
+            --task-timeout 10m
