@@ -7,4 +7,4 @@ RUN npm install --omit=dev
 
 COPY . .
 
-CMD [ "node", "index.js" ]
+CMD ["node", "backend/jobs/dailyBatch.js"]

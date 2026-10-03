@@ -1,10 +1,11 @@
 {
-  "name": "findb-engine",
+  "name": "findb",
   "version": "1.0.0",
   "description": "FinDB Processing Engine",
-  "main": "index.js",
+  "type": "module",
   "scripts": {
-    "start": "node index.js"
+    "start": "node backend/jobs/dailyBatch.js",
+    "batch": "node backend/jobs/dailyBatch.js"
   },
   "dependencies": {}
 }
