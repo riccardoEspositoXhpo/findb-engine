@@ -1,4 +1,4 @@
-import { runTestQuery } from "./testQuery.js";
+import { runTestQuery } from "../scripts/testQuery.js";
 
 async function runDailyBatch() {
   const startTime = Date.now();
