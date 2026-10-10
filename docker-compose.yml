@@ -1,0 +1,28 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: findb-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: findb_user
+      POSTGRES_PASSWORD: findb_password
+      POSTGRES_DB: findb
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  engine:
+    build: .
+    container_name: findb-engine
+    depends_on:
+      - postgres
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app/backend
+
+volumes:
+  pgdata:

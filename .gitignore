@@ -1,0 +1,33 @@
+# ==============================================================================
+# FinDB Engine - Git Ignore
+# ==============================================================================
+
+# Depdendencies
+node_modules/
+
+# Secrets / Variables
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+logs/
+
+# Build output
+dist/
+build/
+.vite/
+*.timestamp-*
+
+# 5. Local DB
+pgdata/
+*.sqlite
+
+# IDE / filesystem
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
