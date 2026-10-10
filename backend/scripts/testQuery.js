@@ -12,7 +12,7 @@ export async function runTestQuery() {
   const pool = new Pool({
     connectionString,
     ssl: { rejectUnauthorized: false },
-    connectionTimeoutMillis: 5000
+    connectionTimeoutMillis: 5000,
   });
 
   const client = await pool.connect();
@@ -47,9 +47,14 @@ export async function runTestQuery() {
       DO UPDATE SET value = EXCLUDED.value
       RETURNING id, date, value, created_at;
     `;
-    const upsertResult = await client.query(upsertSql, [targetDate, randomValue]);
-    console.log("[testQuery] UPSERT applied successfully:", upsertResult.rows[0]);
-
+    const upsertResult = await client.query(upsertSql, [
+      targetDate,
+      randomValue,
+    ]);
+    console.log(
+      "[testQuery] UPSERT applied successfully:",
+      upsertResult.rows[0],
+    );
   } finally {
     // Rilascio garantito della connessione al pool
     client.release();

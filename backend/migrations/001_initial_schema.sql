@@ -39,12 +39,12 @@ CREATE TABLE IF NOT EXISTS breakdown_catalog (
 
 -- List of Currencies
 CREATE TABLE IF NOT EXISTS currencies (
-    currency_code TEXT PRIMARY KEY,
-    currency_name TEXT,
-    is_crypto BOOLEAN NOT NULL DEFAULT FALSE,
+    currency_code VARCHAR(10) PRIMARY KEY,
+    currency_name VARCHAR(100),
+    type VARCHAR(20) NOT NULL CHECK (type IN ('FIAT', 'CRYPTO', 'STABLECOIN')),
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
 
 -- MASTER tables
 

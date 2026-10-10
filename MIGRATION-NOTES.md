@@ -16,3 +16,4 @@
 - [TABLE-CURRENCIES] Creata tabella anagrafica `currencies`. Tutti i campi valuta (`portfolios.currency`, `aggregates.currency`, `security_master.currency`, `transactions.counter_currency`, `transactions.fee_currency`) ora hanno vincolo `REFERENCES currencies(currency_code) ON DELETE RESTRICT`.
 - [UNIFIED-FX-RATES] Unificati i fogli storici `fxRateDaily` e `cryptoRateDaily` nella singola tabella normalizzata `fx_rates` con coppie (`base_currency`, `quote_currency`).
 - [MARKET_VALUE_EUR] new column everywhere lel
+- [HASH_MAP] la gestione dei dati in memoria sara hashmap al posto di arrayOfObjects

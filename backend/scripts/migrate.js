@@ -17,14 +17,16 @@ async function runMigrations() {
   const pool = new Pool({
     connectionString,
     ssl: { rejectUnauthorized: false },
-    connectionTimeoutMillis: 5000
+    connectionTimeoutMillis: 5000,
   });
 
   const client = await pool.connect();
   const migrationsDir = path.join(__dirname, "../migrations");
 
   try {
-    console.log("[migrate] Connected to Postgres. Initializing migration ledger...");
+    console.log(
+      "[migrate] Connected to Postgres. Initializing migration ledger...",
+    );
 
     // 1. Inizializza tabella tracciamento migrazioni
     await client.query(`
@@ -36,7 +38,9 @@ async function runMigrations() {
 
     // 2. Lettura e ordinamento alfabetico/numerico dei file .sql
     if (!fs.existsSync(migrationsDir)) {
-      throw new Error(`[migrate] Migrations folder not found at: ${migrationsDir}`);
+      throw new Error(
+        `[migrate] Migrations folder not found at: ${migrationsDir}`,
+      );
     }
 
     const files = fs
@@ -65,7 +69,7 @@ async function runMigrations() {
         await client.query(sqlContent);
         await client.query(
           "INSERT INTO schema_migrations (name) VALUES ($1);",
-          [file]
+          [file],
         );
         await client.query("COMMIT;");
         console.log(`[migrate] Successfully applied: ${file}`);
@@ -78,7 +82,9 @@ async function runMigrations() {
     }
 
     if (executedCount === 0) {
-      console.log("[migrate] Database is already up to date. No new migrations found.");
+      console.log(
+        "[migrate] Database is already up to date. No new migrations found.",
+      );
     } else {
       console.log(`[migrate] Finished. Applied ${executedCount} migration(s).`);
     }
