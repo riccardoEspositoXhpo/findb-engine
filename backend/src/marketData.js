@@ -59,7 +59,7 @@ async function fetchBceFxRates(dateObj) {
   endpoint = isToday ? "latest" : targetDateStr;
 
   const url = `https://api.frankfurter.dev/v1/${endpoint}?base=EUR`;
-  const response = await fetchWithRetry(url);
+  const response = await utils.fetchWithRetry(url);
 
   if (!response.ok) {
     throw new Error(
