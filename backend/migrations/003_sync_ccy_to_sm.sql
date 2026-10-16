@@ -1,5 +1,3 @@
--- Migration 003: Automated trigger to sync currencies (FIAT, CRYPTO, STABLECOIN) to security_master
-
 CREATE OR REPLACE FUNCTION sync_currency_to_security_master()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -10,12 +8,12 @@ BEGIN
             valuation_frequency, source, asset_class, asset_classification, 
             region, italy_exposure
         ) VALUES (
-            'CASH_' || NEW.code, 
-            NEW.name || ' Cash', 
+            'CASH_' || NEW.currency_code, 
+            NEW.currency_name || ' Cash', 
             'CASH', 
-            NEW.code, 
+            NEW.currency_code, 
             'DLY', 
-            'NA', 
+            '', 
             'Liquidity', 
             'Liquidity', 
             'No Region', 
@@ -30,12 +28,12 @@ BEGIN
             valuation_frequency, source, asset_class, asset_classification, 
             region, italy_exposure
         ) VALUES (
-            NEW.code, 
-            NEW.name, 
+            NEW.currency_code, 
+            NEW.currency_name, 
             'CRYPTO', 
-            NEW.code, 
+            NEW.currency_code, 
             'DLY', 
-            'NA', 
+            '', 
             'Alternatives', 
             'Alternative Cryptocurrencies', 
             'No Region', 
@@ -50,12 +48,12 @@ BEGIN
             valuation_frequency, source, asset_class, asset_classification, 
             region, italy_exposure
         ) VALUES (
-            NEW.code, 
-            NEW.name, 
+            NEW.currency_code, 
+            NEW.currency_name, 
             'CRYPTO', 
-            NEW.code, 
+            NEW.currency_code, 
             'DLY', 
-            'NA', 
+            '', 
             'Alternatives', 
             'Alternative Cryptocurrencies', 
             'No Region', 
@@ -68,7 +66,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Attach trigger to currencies table
+-- Re-attach trigger
 DROP TRIGGER IF EXISTS trg_sync_currency_sec_master ON currencies;
 CREATE TRIGGER trg_sync_currency_sec_master
     AFTER INSERT ON currencies

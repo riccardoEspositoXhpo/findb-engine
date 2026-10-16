@@ -1,6 +1,10 @@
-import * as utils from "./utils.js";
+import { utils } from "./utils.js";
 import { query, replaceDataInDb } from "./db.js";
 import { config } from "../config.js";
+
+export const marketData = {
+  run,
+};
 
 /**
  * Fetches EUR-base FX rates from Frankfurter API.

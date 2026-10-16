@@ -1,7 +1,7 @@
 // PostgreSQL connection pool, transaction orchestrator, and data access layer (ESM)
 import { config } from "../config.js";
 import pg from "pg";
-import * as utils from "./utils.js";
+import { utils } from "./utils.js";
 
 const { Pool } = pg;
 

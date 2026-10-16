@@ -5,9 +5,10 @@
  * - Handles graceful database pool termination and exit codes.
  */
 
-import * as marketData from "../src/marketData.js";
 import { pool } from "../src/db.js";
 import { config } from "../config.js";
+import { overnightQC } from "../src/overnightQC.js";
+import { marketData } from "../src/marketData.js";
 
 async function runDailyBatch() {
   const startTime = Date.now();
@@ -15,8 +16,25 @@ async function runDailyBatch() {
   console.log("=== [FinDB Daily Batch] Starting execution ===");
 
   try {
-    // 1. Master Market Data Pipeline (FIAT + Crypto concurrently)
+    // 1. Master Market Data Pipeline (fx rates, prices)
     await marketData.run(config.date);
+
+    // n. Overnight QC Process
+    const qcResults = await overnightQC.runAll(config.date);
+
+    for (const check of qcResults.results) {
+      if (!check.passed) {
+        console.error(
+          `[QC FAIL] Check '${check.check}' has failed for date ${check.date}.`,
+        );
+      } else {
+        console.log(
+          `[QC PASS] ${check.check} passed successfully (${check.count} records found).`,
+        );
+      }
+    }
+
+    // TBD - decide if any failed check is critical / warning / etc.
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
     console.log(

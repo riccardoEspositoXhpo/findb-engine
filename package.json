@@ -5,9 +5,12 @@
   "scripts": {
     "start": "node backend/jobs/dailyBatch.js",
     "test:batch": "node --env-file=.env backend/jobs/dailyBatch.js",
-    "db:migrate": "node backend/scripts/migrate.js"
+    "db:migrate": "node backend/scripts/migrate.js",
+    "qc": "vitest run backend/tests/overnight.qc.test.js"
   },
   "dependencies": {
-    "pg": "^8.13.0"
+    "cheerio": "^1.2.0",
+    "pg": "^8.13.0",
+    "vitest": "^5.0.5"
   }
 }

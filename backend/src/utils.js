@@ -1,5 +1,13 @@
 // backend/utils.js
 // Data conversion utilities and schema introspection (ESM)
+export const utils = {
+  getTablePrimaryKey,
+  dbToMap,
+  mapToDb,
+  formatDate,
+  fetchWithRetry,
+  toIsoDate,
+};
 
 // In-memory cache for primary keys: Map<tableName, string | string[]>
 const pkCache = new Map();
@@ -10,7 +18,7 @@ const pkCache = new Map();
  * @param {string} tableName - Target table name
  * @returns {Promise<string|string[]>} Single column name or array of composite keys
  */
-export async function getTablePrimaryKey(dbClient, tableName) {
+async function getTablePrimaryKey(dbClient, tableName) {
   if (pkCache.has(tableName)) {
     return pkCache.get(tableName);
   }
@@ -47,7 +55,7 @@ export async function getTablePrimaryKey(dbClient, tableName) {
  * @param {string|string[]} keyDef - Column name string or array of column names
  * @returns {Map<string, Object>} Fast O(1) in-memory lookup map
  */
-export function dbToMap(records, keyDef) {
+function dbToMap(records, keyDef) {
   const map = new Map();
   if (!Array.isArray(records)) return map;
 
@@ -72,7 +80,7 @@ export function dbToMap(records, keyDef) {
  * @param {Map<string, Object>|Object} mapOrObject - Source Map or Key-Value dictionary
  * @returns {Array<Object>} Clean array of objects ready for database queries/bulk inserts
  */
-export function mapToDb(mapOrObject) {
+function mapToDb(mapOrObject) {
   if (mapOrObject instanceof Map) {
     return Array.from(mapOrObject.values());
   }
@@ -89,7 +97,7 @@ export function mapToDb(mapOrObject) {
  * @param {Date|string|number} [date=new Date()] - Date to format
  * @returns {string} Formatted date string (YYYY-MM-DD)
  */
-export function formatDate(date = new Date()) {
+function formatDate(date = new Date()) {
   const d = date instanceof Date ? date : new Date(date);
 
   if (isNaN(d.getTime())) {
@@ -114,7 +122,7 @@ export function formatDate(date = new Date()) {
  * @param {number} [retryConfig.delayMs=2000] - Initial delay in milliseconds
  * @returns {Promise<Response>} Resolves with standard fetch Response
  */
-export async function fetchWithRetry(
+async function fetchWithRetry(
   url,
   options = {},
   { retries = 3, delayMs = 2000 } = {},
@@ -154,4 +162,12 @@ export async function fetchWithRetry(
       await new Promise((resolve) => setTimeout(resolve, backoff));
     }
   }
+}
+
+/**
+ * Formats a Date object or string into 'YYYY-MM-DD' in UTC.
+ */
+function toIsoDate(d = new Date()) {
+  const dateObj = d instanceof Date ? d : new Date(d);
+  return dateObj.toISOString().split("T")[0];
 }

@@ -11,7 +11,7 @@ CREATE OR REPLACE FUNCTION is_valid_valuation_schedule(freq valuation_frequency_
 RETURNS BOOLEAN AS $$
 BEGIN
     RETURN (
-        (freq IN ('DLY', 'BIZ', 'ADHOC') AND day_val IS NULL) OR
+        (freq IN ('DLY', 'BIZ', 'ONE') AND day_val IS NULL) OR
         (freq = 'WKL' AND day_val BETWEEN 0 AND 6) OR
         (freq = 'MTH' AND day_val BETWEEN 1 AND 31)
     );
