@@ -17,3 +17,4 @@
 - [UNIFIED-FX-RATES] Unificati i fogli storici `fxRateDaily` e `cryptoRateDaily` nella singola tabella normalizzata `fx_rates` con coppie (`base_currency`, `quote_currency`).
 - [MARKET_VALUE_EUR] new column everywhere lel
 - [HASH_MAP] la gestione dei dati in memoria sara hashmap al posto di arrayOfObjects
+- [SM_LOCATION] Renamed security_master location to source_id

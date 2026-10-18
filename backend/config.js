@@ -13,7 +13,7 @@ export const config = {
 
   // API Keys
   cmcApiKey: process.env.CMC_API_KEY || null,
-
+  eodhdToken: process.env.EODHD_TOKEN || null,
   // Defaults
   date: new Date(),
 };

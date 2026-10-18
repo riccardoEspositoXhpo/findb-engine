@@ -4,11 +4,14 @@ import { config } from "../config.js";
 
 export const marketData = {
   run,
+  calculateDailyFx,
+  calculateCryptoDailyFx,
 };
 
 /**
  * Fetches EUR-base FX rates from Frankfurter API.
  * Automatically handles weekend gaps using the latest verified Friday fixing.
+ *
  *
  * @param {Date} dateObj - Target evaluation date
  * @returns {Promise<Object<string, number>>} Currency -> Rate map against EUR
@@ -296,4 +299,105 @@ export async function run(targetDate = new Date()) {
   );
 
   return { fiatRecords, cryptoRecords };
+}
+
+/**
+ * Calculates and fetches daily prices from EODHD for active securities
+ * and performs an UPSERT into the PostgreSQL 'prices' table.
+ *
+ * @param {Date} [targetDate=new Date()] - Optional target date
+ * @param {Object} [options={}] - Execution options
+ * @param {string} [options.runOnlyThisId=null] - Optional single security ID to process
+ */
+export async function calculatePrices(targetDate = new Date(), options = {}) {
+  const runOnlyThisId = options.runOnlyThisId || null;
+
+  const apiToken = config.eodhdToken;
+  const baseUrl = "https://eodhd.com/api/eod/";
+
+  const endDate = new Date(targetDate);
+  const startDate = new Date(endDate);
+
+  // TBD
+  startDate.setDate(endDate.getDate() - 7); // 7-day safety window
+
+  const fromStr = utils.toIsoDate(startDate);
+  const toStr = utils.toIsoDate(endDate);
+
+  // 1. Fetch active securities from security_master
+  let query = supabase.from("security_master").select("security_id, source");
+  if (runOnlyThisId) {
+    query = query.eq("security_id", runOnlyThisId);
+  }
+
+  const { data: securities, error: secError } = await query;
+  if (secError) {
+    console.error(
+      "[calculatePrices] Error fetching security master:",
+      secError.message,
+    );
+    return;
+  }
+
+  console.log(
+    `[calculatePrices] Processing prices for ${securities.length} securities...`,
+  );
+
+  for (const sec of securities) {
+    const securityId = sec.security_id;
+    const url = `${baseUrl}${securityId}?api_token=${apiToken}&fmt=json&from=${fromStr}&to=${toStr}`;
+
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        console.warn(
+          `[calculatePrices] Failed to fetch ${securityId}: HTTP ${response.status}`,
+        );
+        continue;
+      }
+
+      const data = await response.json();
+      if (!Array.isArray(data) || data.length === 0) {
+        console.log(`[calculatePrices] No data returned for ${securityId}`);
+        continue;
+      }
+
+      // Grab latest data point in window
+      const latestPoint = data[data.length - 1];
+      const price = parseFloat(latestPoint.adjusted_close || latestPoint.close);
+      const date = latestPoint.date;
+
+      if (isNaN(price)) continue;
+
+      // 2. Upsert into PostgreSQL 'prices' table using primary key (date, security_id)
+      const { error: upsertError } = await supabase.from("prices").upsert(
+        {
+          date: date,
+          security_id: securityId,
+          price: price,
+        },
+        { onConflict: "date,security_id" },
+      );
+
+      if (upsertError) {
+        console.error(
+          `[calculatePrices] DB Upsert error for ${securityId}:`,
+          upsertError.message,
+        );
+      } else {
+        console.log(
+          `[calculatePrices] Saved price ${price} for ${securityId} on ${date}`,
+        );
+      }
+    } catch (e) {
+      console.error(
+        `[calculatePrices] Exception fetching ${securityId}:`,
+        e.message,
+      );
+    }
+  }
+
+  console.log(
+    "[calculatePrices] Price calculation batch completed successfully.",
+  );
 }

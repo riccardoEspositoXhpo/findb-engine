@@ -4,10 +4,88 @@ export const utils = {
   getTablePrimaryKey,
   dbToMap,
   mapToDb,
-  formatDate,
+  formatDateToISO,
   fetchWithRetry,
   toIsoDate,
+  convertItalianFloat,
+  doesItRunToday,
 };
+
+/**
+ * Evaluates whether a security or portfolio should be valued on targetDate.
+ * Uses strict Postgres schema columns: valuation_frequency ('DLY','BIZ','WKL','MTH') and valuation_day (INT).
+ */
+function doesItRunToday(entity, targetDate = new Date()) {
+  const dateObj =
+    targetDate instanceof Date ? targetDate : new Date(targetDate);
+  const freq = (entity.valuation_frequency || "").toUpperCase().trim();
+  const valDay = Number(entity.valuation_day || null);
+
+  switch (freq) {
+    case "DLY":
+      return true;
+    case "BIZ": {
+      const dow = dateObj.getUTCDay();
+      return dow >= 1 && dow <= 5;
+    }
+    case "WKL":
+      return dateObj.getUTCDay() === valDay;
+    case "MTH":
+      return dateObj.getUTCDate() === valDay;
+    default:
+      return false;
+  }
+}
+
+/**
+ * Custom parseFloat that parses Italian formatted numbers,
+ * strips arbitrary prefixes (like 'EUR', '~', whitespace), and returns a standard float.
+ *
+ * Examples:
+ * - "EUR 35.123,49" -> 35123.49
+ * - " ~ 1.250,50 EUR " -> 1250.5
+ * - "101,42" -> 101.42
+ *
+ * @param {string|number} rawStr - Raw input string or number
+ * @returns {number} Standard floating-point number
+ */
+function convertItalianFloat(rawStr) {
+  if (rawStr === null || rawStr === undefined) return NaN;
+  if (typeof rawStr === "number") return rawStr;
+
+  // Convert to string and clean up weird prefixes, symbols, and whitespace
+  const cleaned = String(rawStr)
+    .replace(/[a-zA-Z]/g, "") // remove currency symbols / text like EUR
+    .replace(/[^0-9.,-]/g, "") // strip everything except digits, dots, commas, minus signs
+    .trim();
+
+  if (!cleaned) return NaN;
+
+  // Detect Italian format: if both dot and comma exist, or if comma is used as decimal separator
+  let normalized = cleaned;
+  if (cleaned.includes(".") && cleaned.includes(",")) {
+    // Assume European format: dots are thousand separators, comma is decimal
+    normalized = cleaned.replace(/\./g, "").replace(",", ".");
+  } else if (cleaned.includes(",")) {
+    // Only comma exists, treat it as the decimal separator
+    normalized = cleaned.replace(",", ".");
+  } else {
+    /**
+     * Only dots or pure number: check if dot acts as thousand or decimal
+     * Standard Italian single dot case like "12.573" without decimals could be ambiguous,
+     * but typically European strings have decimals. If it's pure standard US or integer, parseFloat handles it.
+     * If it has multiple dots (e.g. "1.250.500"), remove all but the last or replace them.
+     */
+    const lastDotIndex = cleaned.lastIndexOf(".");
+    if (lastDotIndex !== -1 && cleaned.indexOf(".") !== lastDotIndex) {
+      normalized = cleaned.replace(/\./g, (match, offset) =>
+        offset === lastDotIndex ? "." : "",
+      );
+    }
+  }
+
+  return parseFloat(normalized);
+}
 
 // In-memory cache for primary keys: Map<tableName, string | string[]>
 const pkCache = new Map();
@@ -90,23 +168,64 @@ function mapToDb(mapOrObject) {
   return [];
 }
 
-/**
- * Formats a Date object, timestamp, or date string into standard ISO 'YYYY-MM-DD'.
- * Immune to UTC midnight shifts and optimized for PostgreSQL DATE column ingestion.
- *
- * @param {Date|string|number} [date=new Date()] - Date to format
- * @returns {string} Formatted date string (YYYY-MM-DD)
- */
-function formatDate(date = new Date()) {
-  const d = date instanceof Date ? date : new Date(date);
+// utilities.gs
 
-  if (isNaN(d.getTime())) {
-    throw new Error(`[DATE ERROR] Invalid date provided: ${date}`);
+/**
+ * Unified date formatter. Converts a Date object, timestamp, or date string
+ * in various formats (e.g., 'DD/MM/YYYY', 'YYYY-MM-DD') into standard ISO 'YYYY-MM-DD'.
+ * Optimized for PostgreSQL DATE column ingestion and immune to timezone shifts.
+ *
+ * @param {Date|string|number} [inputDate=new Date()] - Date to format
+ * @param {string} [inputFormat="DD/MM/YYYY"] - Optional expected input format if parsing strings (e.g., "DD/MM/YYYY", "YYYY-MM-DD")
+ * @returns {string|null} Formatted date string (YYYY-MM-DD) or null
+ */
+function formatDateToISO(inputDate = new Date(), inputFormat = "DD/MM/YYYY") {
+  if (!inputDate) return null;
+
+  // If it's already a Date object or timestamp, format it directly using UTC methods to avoid shifts
+  if (inputDate instanceof Date || typeof inputDate === "number") {
+    const d = new Date(inputDate);
+    if (!isNaN(d.getTime())) {
+      const year = d.getUTCFullYear();
+      const month = String(d.getUTCMonth() + 1).padStart(2, "0");
+      const day = String(d.getUTCDate()).padStart(2, "0");
+      return `${year}-${month}-${day}`;
+    }
   }
 
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
+  // Otherwise, handle string-based parsing based on inputFormat
+  const strDate = String(inputDate).trim();
+  if (!strDate) return null;
+
+  // Support alternative separators like hyphens or dots by normalizing to slashes
+  const normalizedStrDate = strDate.replace(/[-.]/g, "/");
+  const normalizedFormat = inputFormat.replace(/[-.]/g, "/");
+
+  const dateParts = normalizedStrDate.split("/");
+  const formatParts = normalizedFormat.split("/");
+
+  if (dateParts.length !== 3 || formatParts.length !== 3) {
+    // Fallback to standard JS parser if parts don't match
+    const fallbackDate = new Date(strDate);
+    if (!isNaN(fallbackDate.getTime())) {
+      const year = fallbackDate.getFullYear();
+      const month = String(fallbackDate.getMonth() + 1).padStart(2, "0");
+      const day = String(fallbackDate.getDate()).padStart(2, "0");
+      return `${year}-${month}-${day}`;
+    }
+    throw new Error(
+      `[DATE ERROR] Invalid date or format provided: ${inputDate} with format ${inputFormat}`,
+    );
+  }
+
+  const map = {};
+  formatParts.forEach((part, idx) => {
+    map[part[0].toUpperCase()] = parseInt(dateParts[idx], 10);
+  });
+
+  const year = map.Y >= 0 && map.Y <= 99 ? 2000 + map.Y : map.Y;
+  const month = String(map.M).padStart(2, "0");
+  const day = String(map.D).padStart(2, "0");
 
   return `${year}-${month}-${day}`;
 }

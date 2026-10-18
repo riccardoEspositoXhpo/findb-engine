@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "start": "node backend/jobs/dailyBatch.js",
-    "test:batch": "node --env-file=.env backend/jobs/dailyBatch.js",
+    "test:random": "node test.js",
     "db:migrate": "node backend/scripts/migrate.js",
     "qc": "vitest run backend/tests/overnight.qc.test.js"
   },

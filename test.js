@@ -1,12 +1,16 @@
 // test.js
 import * as marketData from "./backend/src/marketData.js";
+import * as price from "./backend/src/priceProviders.js";
+import { importDatabase } from "./backend/src/db.js";
 
-console.log("[TEST] Starting marketData.run in Dry-Run mode...");
+let sec = (await importDatabase("security_master")).filter(
+  (s) => s.source === "EODHD",
+);
 
-try {
-  const records = await marketData.run(new Date("2026-10-01"));
-  console.log("[TEST] Output records:", records);
-  console.log(`[TEST] Successfully generated ${records.length} cross-rates!`);
-} catch (error) {
-  console.error("[TEST] Execution failed:", error);
-}
+console.log(sec);
+// .filter((s) => s.source === "EODHD");
+
+sec.forEach((s) => {
+  let priceData = price.fetchSecurityPrice(s);
+  console.log(s.security_id, priceData);
+});
