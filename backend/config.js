@@ -16,4 +16,8 @@ export const config = {
   eodhdToken: process.env.EODHD_TOKEN || null,
   // Defaults
   date: new Date(),
+
+  // your email
+  targetEmailRecipient: process.env.TARGET_EMAIL_RECIPIENT,
+  smtpPassword: process.env.SMTP_PASS,
 };

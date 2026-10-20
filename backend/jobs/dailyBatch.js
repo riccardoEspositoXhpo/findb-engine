@@ -22,17 +22,7 @@ async function runDailyBatch() {
     // n. Overnight QC Process
     const qcResults = await overnightQC.runAll(config.date);
 
-    for (const check of qcResults.results) {
-      if (!check.passed) {
-        console.error(
-          `[QC FAIL] Check '${check.check}' has failed for date ${check.date}.`,
-        );
-      } else {
-        console.log(
-          `[QC PASS] ${check.check} passed successfully (${check.count} records found).`,
-        );
-      }
-    }
+    
 
     // TBD - decide if any failed check is critical / warning / etc.
 

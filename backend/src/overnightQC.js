@@ -18,7 +18,7 @@ export const overnightQC = {
  * @returns {Promise<{ passed: boolean, count: number, date: string }>}
  */
 export async function hasCryptoRunToday(targetDate = new Date()) {
-  const dateStr = utils.toIsoDate(targetDate);
+  const dateStr = utils.formatDateToISO(targetDate);
 
   // Join fx_rates with currencies to strictly count CRYPTO rate rows for today
   const sql = `
@@ -33,8 +33,14 @@ export async function hasCryptoRunToday(targetDate = new Date()) {
   const count = rows[0]?.count || 0;
 
   return {
+    check: "hasCryptoRunToday",
     passed: count > 0,
-    count,
+    severity: "WARNING",
+    summary:
+      count > 0
+        ? "Crypto FX rates are populated for today."
+        : "No Crypto FX rates found for today.",
+    data: [],
     date: dateStr,
   };
 }
@@ -57,10 +63,10 @@ export async function hasCryptoRunToday(targetDate = new Date()) {
  */
 export async function runAll(targetDate = new Date()) {
   console.log(
-    `[QC] Avvio esecuzione di tutti i controlli di qualità per la data: ${toIsoDate(targetDate)}...`,
+    `[QC] Avvio esecuzione di tutti i controlli di qualità per la data: ${utils.formatDateToISO(targetDate)}...`,
   );
 
-  // Eseguiamo i check attivi (aggiungeremo gli altri nell'array via via)
+  // Active checks to run (add more as we implement them)
   const checksToRun = [hasCryptoRunToday(targetDate)];
 
   const results = await Promise.all(checksToRun);
