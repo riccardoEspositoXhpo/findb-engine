@@ -4,9 +4,10 @@
 import * as cheerio from "cheerio";
 import { config } from "../config.js";
 import { utils } from "./utils.js";
+import YahooFinance from "yahoo-finance2";
 
 // ============================================================================
-// INTERNAL SCRAPER PATHS & HEADERS (Abstracted from // local.gs XMLPATHS)
+// INTERNAL SCRAPER PATHS & HEADERS
 // ============================================================================
 
 const HTTP_HEADERS = {
@@ -19,16 +20,6 @@ const BORSA_PRICE_SELECTOR =
   "#fullcontainer main section div:nth-of-type(3) div:nth-of-type(1) article div div div:nth-of-type(2) div span:nth-of-type(1) strong";
 
 const SCRAPER_ROUTES = {
-  BORSA_ITALIANA: {
-    url: (id) =>
-      `https://www.borsaitaliana.it/borsa/etf/scheda/${id}.html?lang=en`,
-    priceSelector: BORSA_PRICE_SELECTOR,
-  },
-  EUROTLX: {
-    url: (id) =>
-      `https://www.borsaitaliana.it/borsa/obbligazioni/eurotlx/scheda/${id}.html?lang=en`,
-    priceSelector: BORSA_PRICE_SELECTOR,
-  },
   BOT: {
     url: (id) =>
       `https://www.borsaitaliana.it/borsa/obbligazioni/mot/bot/scheda/${id}.html?lang=en`,
@@ -38,19 +29,6 @@ const SCRAPER_ROUTES = {
     url: (id) =>
       `https://www.borsaitaliana.it/borsa/obbligazioni/mot/btp/scheda/${id}.html?lang=en`,
     priceSelector: BORSA_PRICE_SELECTOR,
-  },
-  PIR_50: {
-    url: () =>
-      "https://www.borsaitaliana.it/borsa/fondi/dettaglio/1FADB397095.html?lang=it",
-    priceSelector: "span.t-text.-black-warm-60.-formatPrice",
-    dateSelector:
-      ".l-screen.-sm-6.-md-6.u-pt.summary-fase span.t-text.-block.-size-xs.-xs strong",
-  },
-  MORNINGSTAR: {
-    url: (loc) =>
-      `https://www.morningstar.it/it/funds/snapshot/snapshot.aspx?id=${loc}&investmentType=SA`,
-    priceSelector: "#overviewQuickstatsDiv tr:nth-child(2) td.line.text",
-    dateSelector: "#overviewQuickstatsDiv tr:nth-child(2) td.line.heading",
   },
 };
 
@@ -77,8 +55,8 @@ async function fetchFromEodhd(sec, targetDate) {
   const startDate = new Date(endDate);
   startDate.setUTCDate(endDate.getUTCDate() - 7);
 
-  const fromStr = utils.toIsoDate(startDate);
-  const toStr = utils.toIsoDate(endDate);
+  const fromStr = utils.formatDateToISO(startDate);
+  const toStr = utils.formatDateToISO(endDate);
 
   const url = `${baseUrl}${encodeURIComponent(ticker)}?api_token=${token}&fmt=json&from=${fromStr}&to=${toStr}`;
   const res = await fetch(url, { headers: HTTP_HEADERS });
@@ -101,131 +79,138 @@ async function fetchFromEodhd(sec, targetDate) {
 }
 
 /**
- * 2. Yahoo Finance v8 Chart JSON API Provider (for 0P0000CWZR.F)
+ * Fetches latest daily market price and quote date using the yahoo-finance2 library.
+ * Handles crumb and session management under the hood.
+ *
+ * @param {Object} sec - Security master record (expects security_id and optional source_id)
+ * @param {Date|string} targetDate - Valuation date
+ * @returns {Promise<{security_id: string, date: string, price: number}|null>}
  */
-async function fetchFromYahoo(sec, targetDate) {
+export async function fetchFromYahoo(sec, targetDate) {
   const ticker = (sec.source_id || sec.security_id).trim();
-  const period2 = Math.floor(new Date(targetDate).getTime() / 1000) + 86400;
-  const period1 = period2 - 10 * 86400; // 10-day lookback
+  const yahooFinance = new YahooFinance();
 
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?period1=${period1}&period2=${period2}&interval=1d`;
-  const res = await fetch(url, { headers: HTTP_HEADERS });
+  // Define 10-day lookback window
+  const period2 = new Date(targetDate);
+  period2.setDate(period2.getDate() + 1);
 
-  if (!res.ok) {
-    throw new Error(
-      `Yahoo API HTTP ${res.status} for ${sec.security_id} (${ticker})`,
-    );
-  }
+  const period1 = new Date(targetDate);
+  period1.setDate(period1.getDate() - 10);
 
-  const json = await res.json();
-  const result = json?.chart?.result?.[0];
-  if (!result) return null;
+  try {
+    const result = await yahooFinance.chart(ticker, {
+      period1: period1,
+      period2: period2,
+      interval: "1d",
+    });
 
-  const timestamps = result.timestamp || [];
-  const closes = result.indicators?.quote?.[0]?.close || [];
+    const quotes = result?.quotes || [];
 
-  for (let i = timestamps.length - 1; i >= 0; i--) {
-    if (closes[i] !== null && closes[i] !== undefined && !isNaN(closes[i])) {
+    // Traverse backwards to pick the most recent valid close price
+    for (let i = quotes.length - 1; i >= 0; i--) {
+      const bar = quotes[i];
+      if (bar.close !== null && bar.close !== undefined && !isNaN(bar.close)) {
+        return {
+          security_id: sec.security_id,
+          date: utils.formatDateToISO(new Date(bar.date)),
+          price: parseFloat(bar.close),
+        };
+      }
+    }
+
+    // Fallback to meta regularMarketPrice if historical bars are missing
+    if (result?.meta?.regularMarketPrice) {
+      const marketDate = result.meta.regularMarketTime
+        ? utils.formatDateToISO(new Date(result.meta.regularMarketTime * 1000))
+        : utils.formatDateToISO(targetDate);
+
       return {
         security_id: sec.security_id,
-        date: utils.toIsoDate(new Date(timestamps[i] * 1000)),
-        price: parseFloat(closes[i]),
+        date: marketDate,
+        price: parseFloat(result.meta.regularMarketPrice),
       };
     }
-  }
 
-  if (result.meta?.regularMarketPrice) {
-    const marketDate = result.meta.regularMarketTime
-      ? utils.toIsoDate(new Date(result.meta.regularMarketTime * 1000))
-      : utils.toIsoDate(targetDate);
-    return {
-      security_id: sec.security_id,
-      date: marketDate,
-      price: parseFloat(result.meta.regularMarketPrice),
-    };
+    console.warn(
+      `[Yahoo] No valid price point found for ${sec.security_id} (${ticker})`,
+    );
+    return null;
+  } catch (err) {
+    console.warn(
+      `[Yahoo] Fetch failed for ${sec.security_id} (${ticker}): ${err.message}`,
+    );
+    return null;
   }
-
-  return null;
 }
 
 /**
- * 3. HTML/Cheerio Scraper Provider (Borsa Italiana BTP/BOT/EuroTLX/ETF, PIR_50, Morningstar)
+ * 3. HTML/Cheerio Scraper for Borsa Italiana
+ * Routes requests dynamically using sec.source (e.g. BOT, BTP).
+ * Uses sec.source_id (typically the ISIN or fund code) to build URLs.
+ *
+ * @param {Object} sec - Security master record (security_id, source, source_id)
+ * @param {Date|string} targetDate - Valuation date
+ * @returns {Promise<{security_id: string, date: string, price: number}|null>}
  */
-async function fetchFromHtmlScraper(sec, targetDate) {
+export async function fetchBorsaItaliana(sec, targetDate) {
   const secId = sec.security_id;
-  const loc = (sec.source_id || "").trim();
-  const fallbackDate = utils.toIsoDate(targetDate);
+  const source = (sec.source || "").trim().toUpperCase();
+  // Prefer source_id (e.g. ISIN or Morningstar ID) for URL building, fallback to security_id
+  const lookupId = (sec.source_id || sec.security_id).trim();
+  const fallbackDate = utils.formatDateToISO(targetDate);
 
-  // Route A: PIR_50
-  if (loc === "PIR_50") {
-    const res = await fetch(SCRAPER_ROUTES.PIR_50.url(), {
+  try {
+    // --------------------------------------------------
+    // Route: Borsa Italiana (BTP, BOT, EUROTLX, BORSA_ITALIANA)
+    // --------------------------------------------------
+    const routeKey = SCRAPER_ROUTES[source];
+    const cfg = SCRAPER_ROUTES[routeKey];
+
+    const res = await fetch(cfg.url(lookupId), {
       headers: HTTP_HEADERS,
+      signal: AbortSignal.timeout(10000),
     });
-    if (!res.ok) throw new Error(`PIR_50 HTTP ${res.status}`);
+
+    if (!res.ok) {
+      console.warn(
+        `[Borsa Italiana - ${routeKey}] HTTP ${res.status} for ${secId} (${lookupId})`,
+      );
+      return null;
+    }
+
     const $ = cheerio.load(await res.text());
 
-    const rawPrice = $(SCRAPER_ROUTES.PIR_50.priceSelector).first().text();
-    const rawDate = $(SCRAPER_ROUTES.PIR_50.dateSelector).first().text();
+    let rawPrice = $(cfg.priceSelector).first().text().trim();
+    if (!rawPrice) {
+      rawPrice = $("span.t-text.-size-lg strong, span.-formatPrice")
+        .first()
+        .text()
+        .trim();
+    }
+
+    if (!rawPrice) {
+      console.warn(
+        `[Borsa Italiana - ${routeKey}] Price selector missed for ${secId} (${lookupId})`,
+      );
+      return null;
+    }
+
+    const price =
+      rawPrice.includes(",") && !rawPrice.includes(".")
+        ? utils.convertItalianFloat(rawPrice)
+        : parseFloat(rawPrice.replace(/,/g, ""));
 
     return {
       security_id: secId,
-      date: convertDateFormat(rawDate, "DD/MM/YY") || fallbackDate,
-      price: convertITtoUSNumber(rawPrice),
+      date: fallbackDate,
+      price,
     };
-  }
-
-  // Route B: Morningstar (ALLIANZ_* or explicit MORNINGSTAR source)
-  if (secId.startsWith("ALLIANZ") || sec.source === "MORNINGSTAR") {
-    const res = await fetch(SCRAPER_ROUTES.MORNINGSTAR.url(loc), {
-      headers: HTTP_HEADERS,
-    });
-    if (!res.ok) throw new Error(`Morningstar HTTP ${res.status} for ${secId}`);
-    const $ = cheerio.load(await res.text());
-
-    const rawPrice = $(SCRAPER_ROUTES.MORNINGSTAR.priceSelector).first().text();
-    const rawDate = $(SCRAPER_ROUTES.MORNINGSTAR.dateSelector)
-      .first()
-      .text()
-      .replace(/NAV/gi, "")
-      .replace(/Prezzo di chiusura/gi, "")
-      .trim();
-
-    return {
-      security_id: secId,
-      date: convertDateFormat(rawDate, "DD/MM/YYYY") || fallbackDate,
-      price: convertITtoUSNumber(rawPrice),
-    };
-  }
-
-  // Route C: Borsa Italiana (BTP, BOT, EUROTLX, BORSA_ITALIANA)
-  const routeKey = SCRAPER_ROUTES[loc] ? loc : "BORSA_ITALIANA";
-  const cfg = SCRAPER_ROUTES[routeKey];
-
-  const res = await fetch(cfg.url(secId), { headers: HTTP_HEADERS });
-  if (!res.ok)
-    throw new Error(
-      `Borsa Italiana (${routeKey}) HTTP ${res.status} for ${secId}`,
+  } catch (err) {
+    console.warn(
+      `[HTML Scraper] Error scraping ${secId} (${source}/${lookupId}): ${err.message}`,
     );
-  const $ = cheerio.load(await res.text());
-
-  let rawPrice = $(cfg.priceSelector).first().text().trim();
-  if (!rawPrice) {
-    rawPrice = $("span.t-text.-size-lg strong, span.-formatPrice")
-      .first()
-      .text()
-      .trim();
+    return null;
   }
-
-  const price =
-    rawPrice.includes(",") && !rawPrice.includes(".")
-      ? convertITtoUSNumber(rawPrice)
-      : parseFloat(rawPrice.replace(/,/g, ""));
-
-  return {
-    security_id: secId,
-    date: fallbackDate,
-    price,
-  };
 }
 
 /**
@@ -234,9 +219,7 @@ async function fetchFromHtmlScraper(sec, targetDate) {
  */
 async function fetchFromTrustnet(sec, targetDate) {
   const trustnetUrl =
-    sec.source_id && sec.source_id.startsWith("http")
-      ? sec.source_id.trim()
-      : "https://www.trustnet.com/factsheets/P/P4Y4/aegon-lifepath-flexi-2046-2048-pn-q";
+    "https://www.trustnet.com/factsheets/P/P4Y4/aegon-blackrock-lifepath-flexi-2046-2048-blk-pn-q";
 
   const res = await fetch(`https://r.jina.ai/${trustnetUrl}`, {
     headers: { ...HTTP_HEADERS, "X-Return-Format": "text" },
@@ -262,8 +245,8 @@ async function fetchFromTrustnet(sec, targetDate) {
   const rawPence = parseFloat(match[1].replace(/,/g, ""));
   const priceGbp = Number((rawPence / 100).toFixed(6));
   const quoteDate = match[2]
-    ? convertDateFormat(match[2], "DD/MM/YYYY")
-    : utils.toIsoDate(targetDate);
+    ? utils.formatDateToISO(match[2], "DD/MM/YYYY")
+    : utils.formatDateToISO(targetDate);
 
   return {
     security_id: sec.security_id,
@@ -282,17 +265,21 @@ async function fetchFromTrustnet(sec, targetDate) {
 export async function fetchSecurityPrice(sec, targetDate = new Date()) {
   const source = (sec.source || "").toUpperCase().trim();
 
-  if (sec.security_id === "AGN4648" || source === "TRUSTNET") {
-    return fetchFromTrustnet(sec, targetDate);
-  }
-
   switch (source) {
     case "EODHD":
       return fetchFromEodhd(sec, targetDate);
     case "YAHOO":
       return fetchFromYahoo(sec, targetDate);
-    case "IMPORTXML":
+    case "TRUSTNET":
+      return fetchFromTrustnet(sec, targetDate);
+    case "BOT":
+      return fetchFromHtmlScraper(sec, targetDate);
+    case "BTP":
+      return fetchFromHtmlScraper(sec, targetDate);
+    case "EUROTLX":
+      return fetchFromHtmlScraper(sec, targetDate);
     case "BORSA_ITALIANA":
+      return fetchFromHtmlScraper(sec, targetDate);
     case "MORNINGSTAR":
       return fetchFromHtmlScraper(sec, targetDate);
     default:

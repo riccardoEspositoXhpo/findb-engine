@@ -6,7 +6,6 @@ export const utils = {
   mapToDb,
   formatDateToISO,
   fetchWithRetry,
-  toIsoDate,
   convertItalianFloat,
   doesItRunToday,
 };
@@ -281,12 +280,4 @@ async function fetchWithRetry(
       await new Promise((resolve) => setTimeout(resolve, backoff));
     }
   }
-}
-
-/**
- * Formats a Date object or string into 'YYYY-MM-DD' in UTC.
- */
-function toIsoDate(d = new Date()) {
-  const dateObj = d instanceof Date ? d : new Date(d);
-  return dateObj.toISOString().split("T")[0];
 }
