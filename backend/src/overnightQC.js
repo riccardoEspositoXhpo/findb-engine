@@ -1,79 +1,129 @@
-import { query } from "./db.js";
-import { utils } from "./utils.js";
-
-export const overnightQC = {
-  hasCryptoRunToday,
-  runAll,
-};
-
-// ============================================================================
-// INDIVIDUAL QC CHECKS (Granular, SQL-first, zero memory bloat)
-// ============================================================================
+// overnightQC.js
+import { query } from "../db.js";
+import { utils } from "../utils.js";
 
 /**
- * Verifies that Crypto FX rates have been populated in fx_rates for targetDate.
- * Runs 24/7 (every single calendar day).
+ * Generic, reusable engine to verify if an arbitrary table/pipeline has run for a target date.
+ * Replaces the legacy `hasProductionRun` check from local.gs.
  *
- * @param {Date|string} [targetDate=new Date()] - Date to verify
- * @returns {Promise<{ passed: boolean, count: number, date: string }>}
+ * @param {Object} options
+ * @param {string} options.checkName - Unique identifier for the QC report
+ * @param {string} options.tableName - Target DB table or view
+ * @param {Date|string} options.targetDate - Valuation date
+ * @param {string} [options.dateColumn='date'] - Date column name in the table
+ * @param {string} [options.whereClause=''] - Optional additional SQL predicates (e.g. JOINs / filters)
+ * @param {Array} [options.params=[]] - Query parameter bindings
+ * @param {boolean} [options.isWeekdayOnly=false] - If true, auto-passes on weekends (Saturday & Sunday)
+ * @param {string} [options.entityLabel='Records'] - Human-readable label for the summary
+ * @param {number} [options.minThreshold=1] - Minimum row count required to pass
+ * @returns {Promise<Object>} Standardized QC check payload
  */
-export async function hasCryptoRunToday(targetDate = new Date()) {
-  const dateStr = utils.formatDateToISO(targetDate);
+export async function hasTableRunToday({
+  checkName,
+  tableName,
+  targetDate = new Date(),
+  dateColumn = "date",
+  whereClause = "",
+  params = [],
+  isWeekdayOnly = false,
+  entityLabel = "Records",
+  minThreshold = 1,
+}) {
+  const dateObj =
+    targetDate instanceof Date ? targetDate : new Date(targetDate);
+  const dateStr = utils.toIsoDate(dateObj);
+  const dayOfWeek = dateObj.getDay(); // 0 = Sunday, 6 = Saturday
 
-  // Join fx_rates with currencies to strictly count CRYPTO rate rows for today
+  // If the check is weekday-only and today is a weekend session, bypass query and pass cleanly
+  if (isWeekdayOnly && (dayOfWeek === 0 || dayOfWeek === 6)) {
+    return {
+      check: checkName,
+      passed: true,
+      severity: "WARNING",
+      summary: `${entityLabel} market is closed on weekends. Check skipped.`,
+      data: [],
+      date: dateStr,
+    };
+  }
+
+  // Construct parameterized query. $1 is always the target date
   const sql = `
     SELECT COUNT(*)::int AS count
-    FROM fx_rates f
-    JOIN currencies c ON f.base_currency = c.currency_code
-    WHERE f.date = $1::date
-      AND c.type = 'CRYPTO';
+    FROM ${tableName}
+    ${whereClause}
   `;
 
-  const { rows } = await query(sql, [dateStr]);
+  const queryParams = [dateStr, ...params];
+  const { rows } = await query(sql, queryParams);
   const count = rows[0]?.count || 0;
+  const passed = count >= minThreshold;
 
   return {
-    check: "hasCryptoRunToday",
-    passed: count > 0,
+    check: checkName,
+    passed,
     severity: "WARNING",
-    summary:
-      count > 0
-        ? "Crypto FX rates are populated for today."
-        : "No Crypto FX rates found for today.",
-    data: [],
+    summary: passed
+      ? `${entityLabel} populated for today (${count} records found).`
+      : `No ${entityLabel.toLowerCase()} found for today.`,
+    data: passed
+      ? []
+      : [
+          {
+            table: tableName,
+            date: dateStr,
+            expected_min: minThreshold,
+            actual_count: count,
+          },
+        ],
     date: dateStr,
   };
 }
 
-// ============================================================================
-// PLACEHOLDERS FOR UPCOMING CHECKS (We will implement these one by one)
-// ============================================================================
-
-// export async function hasFiatFxRunToday(targetDate = new Date()) {}
-// export async function hasPricesRunToday(targetDate = new Date()) {}
-// export async function isFxTimeSeriesContinuous() {}
-// export async function isLatestValueOutOfBounds() {}
-// export async function doesNavMatchSumOfPositions() {}
-// export async function checkWeightsSum() {}
+/**
+ * Verifies that Crypto FX rates have been populated in fx_rates for targetDate.
+ * Runs 24/7 (continuous crypto calendar).
+ */
+export async function hasCryptoRunToday(targetDate = new Date()) {
+  return hasTableRunToday({
+    checkName: "hasCryptoRunToday",
+    tableName:
+      "fx_rates f JOIN currencies c ON f.base_currency = c.currency_code",
+    targetDate,
+    whereClause: "WHERE f.date = $1::date AND c.type = 'CRYPTO'",
+    isWeekdayOnly: false,
+    entityLabel: "Crypto FX rates",
+  });
+}
 
 /**
- * Esegue tutti i check di Quality Control in sequenza.
- * @param {Date|string} [targetDate=new Date()]
- * @returns {Promise<{ allPassed: boolean, results: Array }>}
+ * Verifies that Fiat FX rates have been populated in fx_rates for targetDate.
+ * Runs strictly on weekdays (Monday - Friday). Bypasses execution on weekends.
+ * Explicitly filters for c.type = 'FIAT' to isolate from CRYPTO and STABLECOIN.
  */
-export async function runAll(targetDate = new Date()) {
-  console.log(
-    `[QC] Avvio esecuzione di tutti i controlli di qualità per la data: ${utils.formatDateToISO(targetDate)}...`,
-  );
+export async function hasFxRunToday(targetDate = new Date()) {
+  return hasTableRunToday({
+    checkName: "hasFxRunToday",
+    tableName:
+      "fx_rates f JOIN currencies c ON f.base_currency = c.currency_code",
+    targetDate,
+    whereClause: "WHERE f.date = $1::date AND c.type = 'FIAT'",
+    isWeekdayOnly: true,
+    entityLabel: "Fiat FX rates",
+  });
+}
 
-  // Active checks to run (add more as we implement them)
-  const checksToRun = [hasCryptoRunToday(targetDate)];
+export const overnightQC = {
+  hasTableRunToday,
+  hasCryptoRunToday,
+  hasFxRunToday,
+  runAll,
+};
 
-  const results = await Promise.all(checksToRun);
-  const allPassed = results.every((r) => r.passed);
+async function runAll(targetDate = new Date()) {
+  const results = await Promise.all([
+    hasCryptoRunToday(targetDate),
+    hasFxRunToday(targetDate),
+  ]);
 
-  return {
-    allPassed,
-    results,
-  };
+  return { results };
 }

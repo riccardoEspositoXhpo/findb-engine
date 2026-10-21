@@ -36,7 +36,7 @@ export async function calculatePrices(targetDate = new Date(), options = {}) {
     whereClause += ` AND security_id = $1`;
   }
 
-  const { rows: securities } = await db.query(
+  const { rows: securities } = await query(
     `SELECT *
      FROM security_master
      ${whereClause}
@@ -87,7 +87,8 @@ export async function calculatePrices(targetDate = new Date(), options = {}) {
       }
 
       const { sec, data } = item.value;
-      const parsedPrice = parseFloat(data?.price);
+      // round to 5 decimal places to keep it clean
+      const parsedPrice = Number(parseFloat(data?.price).toFixed(5));
 
       // Filter out 0 or NaN prices (matching finalPrices filter in // securityData.gs)
       if (!data || isNaN(parsedPrice) || parsedPrice <= 0) {
