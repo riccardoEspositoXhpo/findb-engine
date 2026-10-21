@@ -9,6 +9,7 @@ import { pool } from "../src/db.js";
 import { config } from "../config.js";
 import { overnightQC } from "../src/overnightQC.js";
 import { marketData } from "../src/marketData.js";
+import { sendQcEmail } from "../src/qcNotification.js";
 
 async function runDailyBatch() {
   const startTime = Date.now();
@@ -22,7 +23,8 @@ async function runDailyBatch() {
     // n. Overnight QC Process
     const qcResults = await overnightQC.runAll(config.date);
 
-    
+    // Final QC email
+    await sendQcEmail(qcResults, config.date);
 
     // TBD - decide if any failed check is critical / warning / etc.
 

@@ -61,4 +61,3 @@ export async function runTestQuery() {
     await pool.end();
   }
 }
-
