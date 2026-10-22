@@ -9,4 +9,4 @@ import { config } from "./backend/config.js";
 //   (s) => s.source === "EODHD" && s.security_id === "BLK",
 // );
 
-await marketData.calculatePrices(config.date);
+marketData.calculateCryptoDailyFx(new Date("2026-10-12"));

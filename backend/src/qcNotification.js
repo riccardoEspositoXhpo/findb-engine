@@ -3,223 +3,280 @@ import { config } from "../config.js";
 
 // src/reports/qcEmailReporter.js
 
-/**
- * Palette Nord Theme Specifications:
- * https://www.nordtheme.com/docs/colors-and-palettes
- */
 const NORD = {
-  polarNight0: "#2E3440", // Dark base background
-  polarNight1: "#3B4252", // Card / Row background
-  polarNight2: "#434C5E", // Borders & separators
-  polarNight3: "#4C566A", // Muted labels
-  snowStorm4: "#D8DEE9", // Secondary text
-  snowStorm6: "#ECEFF4", // Primary white text
-  frost8: "#88C0D0", // Frost Cyan Accent
-  aurora11: "#BF616A", // Aurora Red (FAIL)
-  aurora14: "#A3BE8C", // Aurora Green (PASS)
+  polarNight0: "#2E3440", // Deep background
+  polarNight1: "#3B4252", // Card background
+  polarNight2: "#434C5E", // Row hover / borders
+  polarNight3: "#4C566A", // Muted text / dividers
+  snowStorm0: "#D8DEE9", // Secondary text
+  snowStorm1: "#E5E9F0", // Body text
+  snowStorm2: "#ECEFF4", // Crisp white headers
+  frost2: "#88C0D0", // Accent cyan
+  auroraGreen: "#A3BE8C", // Pass
+  auroraYellow: "#EBCB8B", // Probabilistic Warning
+  auroraOrange: "#D08770", // Deterministic Warning / Badges
+  auroraRed: "#BF616A", // Critical Failure
 };
 
-/**
- * Renders an array of arbitrary diagnostic objects as a dynamic HTML sub-table.
- *
- * @param {Array<Object>} records - Array of diagnostic failure objects
- * @returns {string} Rendered HTML sub-table
- */
-function renderDynamicTable(records) {
-  if (!Array.isArray(records) || records.length === 0) return "";
-
-  const headers = Object.keys(records[0]);
-
-  const thHtml = headers
-    .map(
-      (h) =>
-        `<th style="padding: 6px 10px; font-size: 11px; text-transform: uppercase; color: ${NORD.frost8}; border-bottom: 1px solid ${NORD.polarNight2}; font-family: 'JetBrains Mono', Menlo, Consolas, monospace;">${h}</th>`,
-    )
-    .join("");
-
-  const rowsHtml = records
-    .map((row, idx) => {
-      const bg = idx % 2 === 0 ? NORD.polarNight0 : NORD.polarNight1;
-      const cells = headers
-        .map(
-          (h) =>
-            `<td style="padding: 6px 10px; font-size: 11px; color: ${NORD.snowStorm6}; border-bottom: 1px solid ${NORD.polarNight2}; font-family: 'JetBrains Mono', Menlo, Consolas, monospace;">${row[h] !== undefined && row[h] !== null ? row[h] : ""}</td>`,
-        )
-        .join("");
-      return `<tr style="background-color: ${bg};">${cells}</tr>`;
-    })
-    .join("");
-
-  return `
-    <div style="margin-top: 10px; overflow-x: auto; border: 1px solid ${NORD.polarNight2}; border-radius: 6px;">
-      <table style="width: 100%; border-collapse: collapse; text-align: left;">
-        <thead>
-          <tr style="background-color: ${NORD.polarNight0};">
-            ${thHtml}
-          </tr>
-        </thead>
-        <tbody>
-          ${rowsHtml}
-        </tbody>
-      </table>
-    </div>
-  `;
-}
-
-/**
- * Builds a two-tier executive HTML digest themed with the Nord Palette.
- *
- * @param {Object} qcResults - Output object from overnightQC.runAll()
- * @param {Array<Object>} qcResults.results - Array of QC check outputs
- * @param {Date|string} [targetDate=new Date()] - Valuation date
- * @returns {string} Inline-CSS HTML email body
- */
 export function buildQcEmailHtml(qcResults, targetDate = new Date()) {
-  const checks = qcResults.results || [];
-  const totalChecks = checks.length;
-  const failedChecks = checks.filter((c) => !c.passed);
-  const isAllPassed = failedChecks.length === 0;
-
   const dateStr =
     targetDate instanceof Date
       ? targetDate.toISOString().split("T")[0]
-      : String(targetDate);
-  const timestamp = new Date().toUTCString();
+      : targetDate;
+  const checks = Array.isArray(qcResults?.results) ? qcResults.results : [];
 
-  // Tier 1: Summary Table Rows (Name & Status only)
-  const summaryRowsHtml = checks
-    .map((c, idx) => {
-      const isPassed = Boolean(c.passed);
-      const rowBg = idx % 2 === 0 ? NORD.polarNight0 : NORD.polarNight1;
-      const statusPill = isPassed
-        ? `<span style="color: ${NORD.aurora14}; font-weight: 600; font-size: 12px; background: rgba(163, 190, 140, 0.12); padding: 3px 10px; border-radius: 4px; border: 1px solid rgba(163, 190, 140, 0.3);">PASS</span>`
-        : `<span style="color: ${NORD.aurora11}; font-weight: 600; font-size: 12px; background: rgba(191, 97, 106, 0.12); padding: 3px 10px; border-radius: 4px; border: 1px solid rgba(191, 97, 106, 0.3);">FAIL</span>`;
+  const passedCount = checks.filter((c) => c.passed).length;
+  const criticalCount = checks.filter(
+    (c) => !c.passed && c.severity === "CRITICAL",
+  ).length;
+  const warningCount = checks.filter(
+    (c) => !c.passed && c.severity === "WARNING",
+  ).length;
 
-      return `
-        <tr style="background-color: ${rowBg}; border-bottom: 1px solid ${NORD.polarNight2};">
-          <td style="padding: 12px 16px; font-family: 'JetBrains Mono', Menlo, Consolas, monospace; font-size: 13px; color: ${NORD.snowStorm6};">
-            <strong>${c.check || "Unnamed Check"}</strong>
-            ${c.summary ? `<div style="font-size: 11px; color: ${NORD.snowStorm4}; margin-top: 2px;">${c.summary}</div>` : ""}
-          </td>
-          <td style="padding: 12px 16px; text-align: right; width: 90px;">
-            ${statusPill}
-          </td>
-        </tr>
-      `;
-    })
-    .join("");
-
-  // Tier 2: Detailed Failure Breakdown (Only rendered when there are failures)
-  let failureBreakdownHtml = "";
-  if (!isAllPassed) {
-    const failureCardsHtml = failedChecks
-      .map((c) => {
-        let diagnosticContent = "";
-
-        if (Array.isArray(c.data) && c.data.length > 0) {
-          // Dynamic sub-table from array of objects
-          diagnosticContent = renderDynamicTable(c.data);
-        } else if (c.data && typeof c.data === "object") {
-          // Generic object fallback
-          diagnosticContent = `
-            <pre style="margin: 8px 0 0 0; padding: 10px; background-color: ${NORD.polarNight0}; border: 1px solid ${NORD.polarNight2}; border-radius: 6px; font-family: 'JetBrains Mono', Menlo, Consolas, monospace; font-size: 11px; color: ${NORD.frost8}; white-space: pre-wrap;">${JSON.stringify(c.data, null, 2)}</pre>
-          `;
-        }
-
-        return `
-          <div style="background-color: ${NORD.polarNight1}; border: 1px solid ${NORD.aurora11}; border-radius: 8px; padding: 14px 16px; margin-bottom: 14px;">
-            <div style="display: flex; justify-content: space-between; align-items: baseline;">
-              <span style="font-family: 'JetBrains Mono', Menlo, Consolas, monospace; font-size: 13px; font-weight: 700; color: ${NORD.aurora11};">
-                🚨 ${c.check}
-              </span>
-            </div>
-            ${c.message ? `<div style="font-size: 12px; color: ${NORD.snowStorm6}; margin-top: 6px;">${c.message}</div>` : ""}
-            ${diagnosticContent}
-          </div>
-        `;
-      })
-      .join("");
-
-    failureBreakdownHtml = `
-      <div style="padding: 20px 24px; background-color: ${NORD.polarNight0}; border-top: 2px solid ${NORD.aurora11};">
-        <h2 style="margin: 0 0 12px 0; font-size: 15px; text-transform: uppercase; letter-spacing: 0.05em; color: ${NORD.aurora11};">
-          Action Required: Failure Diagnostics (${failedChecks.length})
-        </h2>
-        ${failureCardsHtml}
-      </div>
-    `;
-  }
+  const criticalFailures = checks.filter(
+    (c) => !c.passed && c.severity === "CRITICAL",
+  );
+  const warningFailures = checks.filter(
+    (c) => !c.passed && c.severity === "WARNING",
+  );
 
   return `
-  <!DOCTYPE html>
-  <html>
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>findb-engine: qc status</title>
-  </head>
-  <body style="margin: 0; padding: 24px; background-color: ${NORD.polarNight0}; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: ${NORD.snowStorm4}; line-height: 1.5;">
-    <div style="max-width: 680px; margin: 0 auto; background-color: ${NORD.polarNight1}; border: 1px solid ${NORD.polarNight2}; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 25px rgba(0, 0, 0, 0.35);">
-      
-      <!-- Top Branding Bar -->
-      <div style="background-color: ${NORD.polarNight2}; padding: 18px 24px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid ${NORD.polarNight3};">
-        <div>
-          <span style="font-size: 11px; font-weight: 700; letter-spacing: 0.1em; color: ${NORD.frost8}; text-transform: uppercase;">findb engine</span>
-          <h1 style="margin: 2px 0 0 0; font-size: 20px; font-weight: 600; color: ${NORD.snowStorm6};">Overnight QC Status</h1>
-        </div>
-        <div>
-          ${
-            isAllPassed
-              ? `<span style="background-color: ${NORD.aurora14}; color:${NORD.polarNight0}; font-weight: 700; padding: 4px 12px; border-radius: 9999px; font-size: 12px; text-transform: uppercase;">ALL PASSED</span>`
-              : `<span style="background-color: ${NORD.aurora11}; color: ${NORD.snowStorm6}; font-weight: 700; padding: 4px 12px; border-radius: 9999px; font-size: 12px; text-transform: uppercase;">${failedChecks.length} FAILED</span>`
-          }
-        </div>
-      </div>
-
-      <!-- Metadata Bar -->
-      <div style="padding: 14px 24px; background-color: ${NORD.polarNight1}; border-bottom: 1px solid ${NORD.polarNight2}; display: flex; font-size: 12px;">
-        <div style="margin-right: 32px;">
-          <div style="color: ${NORD.snowStorm4}; font-size: 11px; text-transform: uppercase;">Target Date</div>
-          <div style="color: ${NORD.snowStorm6}; font-weight: 600; font-family: monospace;">${dateStr}</div>
-        </div>
-        <div style="margin-right: 32px;">
-          <div style="color: ${NORD.snowStorm4}; font-size: 11px; text-transform: uppercase;">Executed At</div>
-          <div style="color: ${NORD.snowStorm6}; font-family: monospace;">${timestamp}</div>
-        </div>
-        <div>
-          <div style="color: ${NORD.snowStorm4}; font-size: 11px; text-transform: uppercase;">Summary</div>
-          <div style="color: ${isAllPassed ? NORD.aurora14 : NORD.aurora11}; font-weight: 600;">
-            ${totalChecks - failedChecks.length}/${totalChecks} Passed
-          </div>
-        </div>
-      </div>
-
-      <!-- Tier 1: Summary Table -->
-      <table style="width: 100%; border-collapse: collapse; text-align: left;">
-        <thead>
-          <tr style="background-color: ${NORD.polarNight2}; font-size: 11px; text-transform: uppercase; color: ${NORD.snowStorm4};">
-            <th style="padding: 10px 16px;">Check Name</th>
-            <th style="padding: 10px 16px; text-align: right;">Status</th>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>FinDB Overnight QC Report - ${dateStr}</title>
+</head>
+<body style="margin: 0; padding: 24px; background-color: ${NORD.polarNight0}; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: ${NORD.snowStorm1};">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width: 800px; margin: 0 auto; background-color: ${NORD.polarNight1}; border-radius: 8px; border: 1px solid ${NORD.polarNight2}; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">
+    
+    <!-- HEADER -->
+    <tr>
+      <td style="padding: 24px 32px; background-color: ${NORD.polarNight1}; border-bottom: 2px solid ${NORD.frost2};">
+        <table width="100%" cellpadding="0" cellspacing="0">
+          <tr>
+            <td>
+              <h1 style="margin: 0; font-size: 20px; font-weight: 700; color: ${NORD.snowStorm2}; letter-spacing: 0.5px;">
+                FINDB OVERNIGHT QC REPORT
+              </h1>
+              <div style="font-size: 13px; color: ${NORD.frost2}; margin-top: 4px; font-weight: 500;">
+                Valuation Date: ${dateStr}
+              </div>
+            </td>
+            <td align="right">
+              <span style="display: inline-block; padding: 6px 12px; border-radius: 4px; font-size: 12px; font-weight: 700; background-color: ${criticalCount > 0 ? NORD.auroraRed : warningCount > 0 ? NORD.auroraOrange : NORD.auroraGreen}; color: ${NORD.snowStorm2}; text-transform: uppercase;">
+                ${criticalCount > 0 ? "CRITICAL ALERT" : warningCount > 0 ? "WARNINGS DETECTED" : "ALL SYSTEMS GREEN"}
+              </span>
+            </td>
           </tr>
-        </thead>
-        <tbody>
-          ${summaryRowsHtml}
-        </tbody>
-      </table>
+        </table>
+      </td>
+    </tr>
 
-      <!-- Tier 2: Dynamic Failure Breakdown -->
-      ${failureBreakdownHtml}
+    <!-- METRIC KPI STRIP -->
+    <tr>
+      <td style="padding: 16px 32px; background-color: ${NORD.polarNight0}; border-bottom: 1px solid ${NORD.polarNight2};">
+        <table width="100%" cellpadding="0" cellspacing="0">
+          <tr>
+            <td width="33%" style="text-align: center; border-right: 1px solid ${NORD.polarNight2};">
+              <div style="font-size: 11px; text-transform: uppercase; color: ${NORD.snowStorm0}; font-weight: 600;">Passed</div>
+              <div style="font-size: 22px; font-weight: 700; color: ${NORD.auroraGreen}; margin-top: 2px;">${passedCount} / ${checks.length}</div>
+            </td>
+            <td width="33%" style="text-align: center; border-right: 1px solid ${NORD.polarNight2};">
+              <div style="font-size: 11px; text-transform: uppercase; color: ${NORD.snowStorm0}; font-weight: 600;">Critical Deficiencies</div>
+              <div style="font-size: 22px; font-weight: 700; color: ${criticalCount > 0 ? NORD.auroraRed : NORD.snowStorm0}; margin-top: 2px;">${criticalCount}</div>
+            </td>
+            <td width="33%" style="text-align: center;">
+              <div style="font-size: 11px; text-transform: uppercase; color: ${NORD.snowStorm0}; font-weight: 600;">Warnings / Anomalies</div>
+              <div style="font-size: 22px; font-weight: 700; color: ${warningCount > 0 ? NORD.auroraOrange : NORD.snowStorm0}; margin-top: 2px;">${warningCount}</div>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
 
-      <!-- Footer -->
-      <div style="padding: 14px 24px; background-color: ${NORD.polarNight0}; border-top: 1px solid ${NORD.polarNight2}; font-size: 11px; color: ${NORD.snowStorm4}; text-align: center;">
-        Automated production telemetry emitted by <strong style="color: ${NORD.frost8};">FinDB GCP Batch Runner</strong>.
-      </div>
-    </div>
-  </body>
-  </html>
+    <!-- TIER 1: EXECUTIVE SUMMARY TABLE -->
+    <tr>
+      <td style="padding: 24px 32px;">
+        <h2 style="margin: 0 0 12px 0; font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: ${NORD.snowStorm2};">
+          Executive Verification Summary
+        </h2>
+        <table width="100%" cellpadding="8" cellspacing="0" style="border-collapse: collapse; font-size: 13px;">
+          <thead>
+            <tr style="border-bottom: 1px solid ${NORD.polarNight3}; text-align: left; color: ${NORD.snowStorm0};">
+              <th style="padding: 8px 12px; font-weight: 600;">Check</th>
+              <th style="padding: 8px 12px; font-weight: 600;">Type</th>
+              <th style="padding: 8px 12px; font-weight: 600;">Severity</th>
+              <th style="padding: 8px 12px; font-weight: 600; text-align: right;">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${checks.map((c, idx) => renderSummaryRow(c, idx)).join("")}
+          </tbody>
+        </table>
+      </td>
+    </tr>
+
+    <!-- TIER 2: FAILURES & ANOMALIES BREAKDOWN -->
+    ${
+      criticalFailures.length > 0 || warningFailures.length > 0
+        ? `
+    <tr>
+      <td style="padding: 0 32px 32px 32px;">
+        <div style="border-top: 1px solid ${NORD.polarNight2}; padding-top: 24px;">
+          
+          ${
+            criticalFailures.length > 0
+              ? `
+          <h2 style="margin: 0 0 16px 0; font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: ${NORD.auroraRed};">
+            🚨 Critical Failures (Immediate Attention)
+          </h2>
+          ${criticalFailures.map((c) => renderDetailCard(c, NORD.auroraRed)).join("")}
+          `
+              : ""
+          }
+
+          ${
+            warningFailures.length > 0
+              ? `
+          <h2 style="margin: ${criticalFailures.length > 0 ? "24px" : "0"} 0 16px 0; font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: ${NORD.auroraOrange};">
+            ⚠️ Warnings & Anomalies (Review Required)
+          </h2>
+          ${warningFailures.map((c) => renderDetailCard(c, NORD.auroraOrange)).join("")}
+          `
+              : ""
+          }
+
+        </div>
+      </td>
+    </tr>
+    `
+        : ""
+    }
+
+    <!-- FOOTER -->
+    <tr>
+      <td style="padding: 16px 32px; background-color: ${NORD.polarNight0}; border-top: 1px solid ${NORD.polarNight2}; font-size: 11px; color: ${NORD.polarNight3}; text-align: center;">
+        Generated automatically by findb-engine on GCP Batch &bull; Environment: Node.js &bull; Database: Postgres
+      </td>
+    </tr>
+
+  </table>
+</body>
+</html>
+  `.trim();
+}
+
+function renderSummaryRow(c, idx) {
+  const isAlt = idx % 2 === 1;
+  const bg = isAlt ? `background-color: rgba(255, 255, 255, 0.02);` : "";
+
+  let badge;
+  if (c.passed) {
+    badge = `<span style="background-color: ${NORD.auroraGreen}; color: ${NORD.polarNight0}; padding: 3px 8px; border-radius: 4px; font-weight: 700; font-size: 11px;">PASS</span>`;
+  } else if (c.severity === "CRITICAL") {
+    badge = `<span style="background-color: ${NORD.auroraRed}; color: ${NORD.snowStorm2}; padding: 3px 8px; border-radius: 4px; font-weight: 700; font-size: 11px;">FAIL</span>`;
+  } else {
+    badge = `<span style="background-color: ${NORD.auroraOrange}; color: ${NORD.snowStorm2}; padding: 3px 8px; border-radius: 4px; font-weight: 700; font-size: 11px;">WARN</span>`;
+  }
+
+  const failureTypeColor =
+    c.failureType === "DETERMINISTIC" ? NORD.frost2 : NORD.auroraYellow;
+
+  return `
+    <tr style="border-bottom: 1px solid ${NORD.polarNight2}; ${bg}">
+      <td style="padding: 10px 12px;">
+        <div style="font-weight: 600; color: ${NORD.snowStorm2};">${c.check}</div>
+        ${c.summary ? `<div style="font-size: 11px; color: ${NORD.snowStorm0}; margin-top: 2px;">${c.summary}</div>` : ""}
+      </td>
+      <td style="padding: 10px 12px; font-size: 11px; font-weight: 600; color: ${failureTypeColor};">
+        ${c.failureType || "DETERMINISTIC"}
+      </td>
+      <td style="padding: 10px 12px; font-size: 11px; font-weight: 600; color: ${c.severity === "CRITICAL" ? NORD.auroraRed : NORD.snowStorm0};">
+        ${c.severity || "WARNING"}
+      </td>
+      <td style="padding: 10px 12px; text-align: right;">
+        ${badge}
+      </td>
+    </tr>
   `;
 }
 
+function renderDetailCard(c, accentColor) {
+  return `
+    <div style="margin-bottom: 16px; background-color: ${NORD.polarNight0}; border: 1px solid ${NORD.polarNight2}; border-left: 4px solid ${accentColor}; border-radius: 4px; padding: 16px;">
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom: 8px;">
+        <tr>
+          <td>
+            <span style="font-weight: 700; color: ${NORD.snowStorm2}; font-size: 13px;">${c.check}</span>
+            <span style="margin-left: 8px; font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 3px; background-color: ${NORD.polarNight2}; color: ${NORD.snowStorm1};">
+              ${c.failureType || "DETERMINISTIC"}
+            </span>
+          </td>
+          <td align="right" style="font-size: 11px; color: ${NORD.snowStorm0};">
+            ${c.date || ""}
+          </td>
+        </tr>
+      </table>
+      
+      ${c.message ? `<div style="font-size: 12px; color: ${NORD.snowStorm1}; margin-bottom: 12px;">${c.message}</div>` : ""}
+
+      ${renderDynamicData(c.data)}
+    </div>
+  `;
+}
+
+/**
+ * Dynamically synthesizes an HTML table capped at 10 rows to prevent Gmail clipping.
+ */
+function renderDynamicData(data) {
+  if (!data) return "";
+
+  if (Array.isArray(data) && data.length > 0 && typeof data[0] === "object") {
+    const columns = Object.keys(data[0]);
+    const maxRows = 10;
+    const isTruncated = data.length > maxRows;
+    const displayRows = isTruncated ? data.slice(0, maxRows) : data;
+
+    return `
+      <table width="100%" cellpadding="6" cellspacing="0" style="border-collapse: collapse; font-size: 11px; background-color: ${NORD.polarNight1}; border-radius: 4px; overflow: hidden; margin-top: 8px;">
+        <thead>
+          <tr style="background-color: ${NORD.polarNight2}; text-align: left; color: ${NORD.snowStorm2};">
+            ${columns.map((col) => `<th style="padding: 6px 10px; font-weight: 600; text-transform: uppercase;">${col}</th>`).join("")}
+          </tr>
+        </thead>
+        <tbody>
+          ${displayRows
+            .map(
+              (row, idx) => `
+            <tr style="border-bottom: 1px solid ${NORD.polarNight2}; background-color: ${idx % 2 === 1 ? "rgba(255,255,255,0.02)" : "transparent"}; color: ${NORD.snowStorm1};">
+              ${columns.map((col) => `<td style="padding: 6px 10px; font-family: monospace;">${row[col] !== null && row[col] !== undefined ? row[col] : ""}</td>`).join("")}
+            </tr>
+          `,
+            )
+            .join("")}
+          ${
+            isTruncated
+              ? `
+            <tr style="background-color: ${NORD.polarNight0}; font-style: italic; color: ${NORD.snowStorm0};">
+              <td colspan="${columns.length}" style="padding: 8px 10px; text-align: center;">
+                ... and ${data.length - maxRows} more rows truncated for email readability.
+              </td>
+            </tr>
+          `
+              : ""
+          }
+        </tbody>
+      </table>
+    `;
+  }
+
+  if (typeof data === "object" && Object.keys(data).length > 0) {
+    return `<pre style="background-color: ${NORD.polarNight1}; padding: 8px; border-radius: 4px; font-size: 11px; color: ${NORD.snowStorm1}; margin: 8px 0 0 0; overflow-x: auto;"><code>${JSON.stringify(data, null, 2)}</code></pre>`;
+  }
+
+  return "";
+}
 /**
  * Dispatches the QC status email strictly to config.targetEmailRecipient.
  *
