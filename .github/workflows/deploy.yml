@@ -28,7 +28,7 @@ jobs:
       - name: Test Cloud Run Job
         run: |
           gcloud run jobs execute ${{ env.JOB_NAME }} \
-            --region  \
+            --region ${{ env.REGION }} \
             --update-env-vars DRY_RUN=true \
             --wait
       - name: Deploy Cloud Run Job from GitHub Repo
