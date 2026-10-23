@@ -1,41 +1,105 @@
 // PostgreSQL connection pool, transaction orchestrator, and data access layer (ESM)
 import { config } from "../config.js";
-import pg from "pg";
 import { utils } from "./utils.js";
+import pg from "pg";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 const { Pool } = pg;
 
+// Dedicated execution context to track active transaction clients per async call stack
+const asyncLocalStorage = new AsyncLocalStorage();
+
 export const pool = new Pool({
-  connectionString: config.databaseUrl,
-  ssl: config.isProduction ? { rejectUnauthorized: false } : false,
+  connectionString: process.env.DATABASE_URL,
+  // Configure sensible defaults for batch processing
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
 });
 
 /**
- * Direct query execution on the connection pool (best for standalone reads)
- * @param {string} text - SQL query string
- * @param {Array} [params] - Parameterized values
- * @returns {Promise<Object>} pg QueryResult object
+ * Returns the contextual database executor.
+ * If running inside a withTransaction() scope, returns the active transactional client;
+ * otherwise, defaults to the shared connection pool.
+ *
+ * @returns {pg.Pool|pg.PoolClient}
  */
-export const query = (text, params) => pool.query(text, params);
+export function getDbExecutor() {
+  return asyncLocalStorage.getStore() || pool;
+}
 
 /**
- * Executes a callback within a managed ACID database transaction.
- * Automatically handles BEGIN, COMMIT, ROLLBACK, and connection release.
+ * Universal query runner. Automatically routes to the transactional client if active.
  *
- * @param {Function} callback - Async function receiving the isolated client: (client) => Promise<any>
- * @returns {Promise<any>} The result returned by callback
+ * @param {string} text - SQL query string
+ * @param {Array<any>} [params] - Query parameters
+ * @returns {Promise<pg.QueryResult>}
  */
-export async function withTransaction(callback) {
+export async function query(text, params) {
+  const executor = getDbExecutor();
+  return executor.query(text, params);
+}
+
+/**
+ * Executes a callback within an isolated database transaction.
+ * Features an internal async mutex queue to serialize concurrent client.query() calls,
+ * allowing Promise.all across the pipeline without TCP socket collisions.
+ */
+export async function withTransaction(callback, { rollback = false } = {}) {
   const client = await pool.connect();
+  const originalQuery = client.query.bind(client);
+
+  // Asynchronous queue chain to serialize concurrent queries on this half-duplex socket
+  let queryQueue = Promise.resolve();
+
+  // Intercept client.query to transparently pipeline overlapping calls
+  client.query = (...args) => {
+    const queuedQuery = queryQueue
+      .catch(() => {
+        // Prevent prior query rejections from terminating the execution chain
+      })
+      .then(() => originalQuery(...args));
+
+    // Advance queue pointer
+    queryQueue = queuedQuery;
+    return queuedQuery;
+  };
+
   try {
-    await client.query("BEGIN");
-    const result = await callback(client);
-    await client.query("COMMIT");
+    await client.query("BEGIN;");
+
+    // Run pipeline with the queued transactional client in async scope
+    const result = await asyncLocalStorage.run(client, async () => {
+      return await callback();
+    });
+
+    if (rollback) {
+      await client.query("ROLLBACK;");
+      console.log(
+        "[DB TRANSACTION] Dry-run complete: Transaction successfully rolled back.",
+      );
+    } else {
+      await client.query("COMMIT;");
+      console.log("[DB TRANSACTION] Transaction successfully committed.");
+    }
+
     return result;
   } catch (error) {
-    await client.query("ROLLBACK");
+    try {
+      await client.query("ROLLBACK;");
+      console.error(
+        "[DB TRANSACTION] Error encountered: Transaction rolled back.",
+      );
+    } catch (rollbackErr) {
+      console.error(
+        "[DB TRANSACTION] Failed to rollback transaction:",
+        rollbackErr,
+      );
+    }
     throw error;
   } finally {
+    // Restore original unmodified client query method before returning connection to pool
+    client.query = originalQuery;
     client.release();
   }
 }
@@ -64,38 +128,32 @@ export async function importDatabase(tableName, asMap = false) {
 /**
  * Universal UPSERT replacing legacy replaceDataInSheet.
  * Atomically inserts new records or updates existing rows on PK conflict.
+ * Automatically hooks into the active AsyncLocalStorage transaction client when running.
  *
  * @param {Array<Object>|Map<string, Object>} data - Records to persist
  * @param {string} tableName - Target PostgreSQL table name
- * @param {Object} [client=null] - Optional pg transaction client
+ * @param {Object} [client=null] - Optional pg client override
  * @returns {Promise<number>} Total count of upserted rows
  */
 export async function replaceDataInDb(data, tableName, client = null) {
-  const dbExecutor = client || pool;
+  // 1. Resolve db executor: inherits active transactional client from AsyncLocalStorage, falls back to pool
+  const dbExecutor = client || getDbExecutor();
 
-  // Intercettazione di sicurezza globale
-  if (config.dryRun) {
-    console.log(
-      `[DRY-RUN] Intercettata persistenza su "${tableName}" (${data.length} righe). Scrittura DB bloccata.`,
-    );
-    return data.length;
-  }
-
-  // 1. Normalize data input (Map -> Array of Objects)
-  const rows = data instanceof Map ? mapToDb(data) : data;
+  // 2. Normalize data input (Map -> Array of Objects)
+  const rows = data instanceof Map ? utils.mapToDb(data) : data;
   if (!Array.isArray(rows) || rows.length === 0) {
     return 0;
   }
 
-  // 2. Discover Primary Key columns dynamically via cached metadata
+  // 3. Discover Primary Key columns dynamically via cached metadata
   const pkDef = await utils.getTablePrimaryKey(dbExecutor, tableName);
   const pkColumns = Array.isArray(pkDef) ? pkDef : [pkDef];
 
-  // 3. Extract unique columns present across the incoming dataset
+  // 4. Extract unique columns present across the incoming dataset
   const columns = Object.keys(rows[0]);
   const nonPkColumns = columns.filter((col) => !pkColumns.includes(col));
 
-  // 4. Build conflict resolution clause
+  // 5. Build conflict resolution clause
   const conflictTarget = pkColumns.join(", ");
   let conflictAction = "";
 
@@ -109,7 +167,7 @@ export async function replaceDataInDb(data, tableName, client = null) {
     conflictAction = "DO NOTHING";
   }
 
-  // 5. Batch processing to avoid parameter overflow (PostgreSQL max: 65535)
+  // 6. Batch processing to avoid parameter overflow (PostgreSQL max: 65535)
   const CHUNK_SIZE = 500;
   let totalProcessed = 0;
 

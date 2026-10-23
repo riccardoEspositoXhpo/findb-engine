@@ -10,7 +10,7 @@ node_modules/
 .env.*
 !.env.example
 *secret*
-
+*do-not-commit*
 
 # Logs
 *.log

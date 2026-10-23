@@ -22,9 +22,15 @@ jobs:
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Set up Cloud SDK  
+      - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
+      - name: Test Cloud Run Job
+        run: |
+          gcloud run jobs execute ${{ env.JOB_NAME }} \
+            --region ${{ env.REGION }} \
+            --update-env-vars DRYRUN=true \
+            --wait
       - name: Deploy Cloud Run Job from GitHub Repo
         run: |
           gcloud run jobs deploy ${{ env.JOB_NAME }} \
