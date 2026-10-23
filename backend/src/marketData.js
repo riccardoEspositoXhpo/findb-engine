@@ -78,7 +78,9 @@ export async function calculatePrices(targetDate = new Date(), options = {}) {
     );
 
     for (const item of settled) {
+      let issue = false;
       if (item.status === "rejected") {
+        issue = true;
         console.error(
           `[PRICES BATCH] Provider error:`,
           item.reason?.message || item.reason,
@@ -92,6 +94,7 @@ export async function calculatePrices(targetDate = new Date(), options = {}) {
 
       // Filter out 0 or NaN prices (matching finalPrices filter in // securityData.gs)
       if (!data || isNaN(parsedPrice) || parsedPrice <= 0) {
+        issue = true;
         console.warn(
           `[PRICES BATCH] Skipping invalid/zero price for ${sec.security_id}`,
         );
@@ -108,8 +111,15 @@ export async function calculatePrices(targetDate = new Date(), options = {}) {
 
       // Log retroactive historical price updates
       if (priceDateStr !== evalDateStr) {
+        issue = true;
         console.log(
-          `[PRICES BATCH] Historical price detected for ${sec.security_id} on ${priceDateStr} (${parsedPrice}).`,
+          `[PRICES BATCH] Historical price for ${sec.security_id} on ${priceDateStr} (${parsedPrice}).`,
+        );
+      }
+
+      if (!issue) {
+        console.log(
+          `[PRICES BATCH] Price for ${sec.security_id} on ${priceDateStr} (${parsedPrice})`,
         );
       }
     }
@@ -407,9 +417,10 @@ export async function run(targetDate = new Date()) {
   const startTime = performance.now();
 
   // Parallel network I/O execution for maximum throughput
-  const [fiatRecords, cryptoRecords] = await Promise.all([
+  const [fiatRecords, cryptoRecords, priceRecords] = await Promise.all([
     calculateDailyFx(targetDate),
     calculateCryptoDailyFx(targetDate),
+    calculatePrices(targetDate),
   ]);
 
   const elapsedSeconds = ((performance.now() - startTime) / 1000).toFixed(2);
@@ -418,5 +429,5 @@ export async function run(targetDate = new Date()) {
       `Persisted ${fiatRecords.length} FIAT and ${cryptoRecords.length} Crypto rates.`,
   );
 
-  return { fiatRecords, cryptoRecords };
+  return { fiatRecords, cryptoRecords, priceRecords };
 }
