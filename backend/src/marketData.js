@@ -41,6 +41,7 @@ export async function calculatePrices(targetDate = new Date(), options = {}) {
      FROM security_master
      ${whereClause}
      ORDER BY security_id ASC`,
+    queryParams,
   );
 
   // 2. Filter by valuation schedule
@@ -241,12 +242,11 @@ async function getDynamicFiatPairs() {
 /**
  * Computes daily cross-rates for all active FIAT pairs and executes a bulk UPSERT into fx_rates.
  *
- * @param {Object} [options={}]
- * @param {Date|string} [options.date=new Date()] - Target valuation date
+ * @param {Date|string} [targetDate=new Date()] - Target valuation date
  * @returns {Promise<Array<Object>>} Stored FX records
  */
-export async function calculateDailyFx(options = {}) {
-  const date = options.date ? new Date(options.date) : new Date();
+export async function calculateDailyFx(targetDate = new Date()) {
+  const date = targetDate instanceof Date ? targetDate : new Date(targetDate);
   const dateStr = date.toISOString().split("T")[0];
 
   console.log(`[FX BATCH] Processing dynamic daily FX for date: ${dateStr}...`);
@@ -297,42 +297,14 @@ export async function calculateDailyFx(options = {}) {
 }
 
 /**
- * Fetches batch quotes from CoinMarketCap and computes daily cross-rates against USDC.
- * Automatically handles both CRYPTO and STABLECOIN assets in a single API call.
+ * Calls CoinMarketCap v2 quotes/{latest|historical} with the given query string and returns json.data.
+ * Response is keyed by CMC id when querying by id, by symbol (array of matches) when querying by symbol.
  *
- * @param {Date|string} [targetDate=new Date()] Optional evaluation date
- * @returns {Promise<Array<Object>>} Computed fx records persisted to DB
+ * @param {string} queryString - e.g. "id=1,1027" or "symbol=BTC,ETH"
+ * @param {"latest"|"historical"} [endpoint="latest"]
+ * @returns {Promise<Object>} CMC data payload
  */
-export async function calculateCryptoDailyFx(targetDate = new Date()) {
-  const dateStr = (
-    targetDate instanceof Date ? targetDate : new Date(targetDate)
-  )
-    .toISOString()
-    .slice(0, 10);
-
-  // 1. Fetch active cryptos and stablecoins from DB (excluding USDC base)
-  const result = await query(`
-    SELECT currency_code 
-    FROM currencies 
-    WHERE type IN ('CRYPTO', 'STABLECOIN') 
-      AND is_active = true 
-      AND currency_code != 'USDC';
-  `);
-
-  if (result.rows.length === 0) {
-    console.log("[CRYPTO BATCH] No active crypto/stablecoin currencies found.");
-    return [];
-  }
-
-  const targetSymbols = result.rows.map((r) => r.currency_code);
-  // Always include USDC in the query to calculate cross-rate and bridge
-  const allSymbols = Array.from(new Set([...targetSymbols, "USDC"]));
-
-  console.log(
-    `[CRYPTO BATCH] Fetching CMC quotes for ${allSymbols.length} tokens: ${allSymbols.join(", ")}...`,
-  );
-
-  // 2. Single batch HTTP request to CoinMarketCap v2 API
+async function fetchCmcQuotes(queryString, endpoint = "latest") {
   const apiKey = config.cmcApiKey;
   if (!apiKey) {
     throw new Error(
@@ -340,7 +312,8 @@ export async function calculateCryptoDailyFx(targetDate = new Date()) {
     );
   }
 
-  const url = `https://pro-api.coinmarketcap.com/v2/cryptocurrency/quotes/latest?symbol=${allSymbols.join(",")}&convert=USD`;
+  // skip_invalid avoids failing the whole batch on a single bad id/symbol
+  const url = `https://pro-api.coinmarketcap.com/v2/cryptocurrency/quotes/${endpoint}?${queryString}&convert=USD&skip_invalid=true`;
   const response = await utils.fetchWithRetry(url, {
     method: "GET",
     headers: {
@@ -357,13 +330,142 @@ export async function calculateCryptoDailyFx(targetDate = new Date()) {
   }
 
   const json = await response.json();
-  const data = json.data || {};
+  return json.data || {};
+}
+
+/**
+ * Fetches the CoinMarketCap daily close (quote stamped at D+1 00:00 UTC) for each CMC id.
+ * Used when the batch runs for a past date.
+ *
+ * @param {Array<string>} ids - CMC ids
+ * @param {string} dateStr - Target date YYYY-MM-DD
+ * @returns {Promise<Object<string, number>>} CMC id -> USD close
+ */
+async function fetchCmcHistoricalCloses(ids, dateStr) {
+  const closeStamp = new Date(`${dateStr}T00:00:00Z`);
+  closeStamp.setUTCDate(closeStamp.getUTCDate() + 1);
+  const closeIso = closeStamp.toISOString();
+
+  const prices = {};
+  const CHUNK_SIZE = 20;
+  for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
+    const chunk = ids.slice(i, i + CHUNK_SIZE).join(",");
+    const data = await fetchCmcQuotes(
+      `id=${chunk}&time_start=${dateStr}&time_end=${closeIso}&interval=daily`,
+      "historical",
+    );
+    for (const [id, coin] of Object.entries(data)) {
+      const close = (coin?.quotes || []).find(
+        (q) => new Date(q.timestamp).toISOString() === closeIso,
+      );
+      if (close?.quote?.USD?.price) prices[id] = close.quote.USD.price;
+    }
+  }
+  return prices;
+}
+
+/**
+ * Fetches batch quotes from CoinMarketCap and computes daily cross-rates against USDC.
+ * Tokens are resolved by CMC id (security_master.source_id) to avoid ticker collisions;
+ * tokens without an id fall back to the ambiguous symbol lookup.
+ *
+ * @param {Date|string} [targetDate=new Date()] Optional evaluation date
+ * @returns {Promise<Array<Object>>} Computed fx records persisted to DB
+ */
+export async function calculateCryptoDailyFx(targetDate = new Date()) {
+  const dateStr = (
+    targetDate instanceof Date ? targetDate : new Date(targetDate)
+  )
+    .toISOString()
+    .slice(0, 10);
+
+  // 1. Fetch active cryptos and stablecoins with their CMC id (USDC always included as cross-rate base)
+  const result = await query(`
+    SELECT c.currency_code, sm.source_id
+    FROM currencies c
+    LEFT JOIN security_master sm ON sm.security_id = c.currency_code
+    WHERE c.type IN ('CRYPTO', 'STABLECOIN')
+      AND (c.is_active = true OR c.currency_code = 'USDC');
+  `);
+
+  const targetSymbols = result.rows
+    .map((r) => r.currency_code)
+    .filter((sym) => sym !== "USDC");
+
+  if (targetSymbols.length === 0) {
+    console.log("[CRYPTO BATCH] No active crypto/stablecoin currencies found.");
+    return [];
+  }
+
+  // Split tokens: resolved by CMC id vs legacy symbol fallback
+  const cmcIdBySymbol = {};
+  const symbolFallback = [];
+  for (const { currency_code, source_id } of result.rows) {
+    if (source_id && /^\d+$/.test(String(source_id).trim())) {
+      cmcIdBySymbol[currency_code] = String(source_id).trim();
+    } else {
+      symbolFallback.push(currency_code);
+    }
+  }
+  if (!cmcIdBySymbol["USDC"] && !symbolFallback.includes("USDC")) {
+    symbolFallback.push("USDC");
+  }
+
+  const idList = Object.values(cmcIdBySymbol);
+  console.log(
+    `[CRYPTO BATCH] Fetching CMC quotes for ${idList.length} tokens by id and ${symbolFallback.length} by symbol` +
+      (symbolFallback.length ? ` (${symbolFallback.join(", ")})` : "") +
+      "...",
+  );
+
+  // 2. Batch HTTP requests to CoinMarketCap v2 API (id and symbol params can't be mixed).
+  // Past dates use the historical daily close: "latest" quotes would be stamped with a stale date.
+  const isPastDate = dateStr < new Date().toISOString().slice(0, 10);
+  if (isPastDate && symbolFallback.length) {
+    console.warn(
+      `[CRYPTO BATCH] Past date ${dateStr}: skipping ${symbolFallback.length} tokens without CMC id (${symbolFallback.join(", ")}).`,
+    );
+  }
+
+  const [idPrices, symbolData] = await Promise.all([
+    !idList.length
+      ? {}
+      : isPastDate
+        ? fetchCmcHistoricalCloses(idList, dateStr)
+        : fetchCmcQuotes(`id=${idList.join(",")}`).then((data) =>
+            Object.fromEntries(
+              Object.entries(data).map(([id, coin]) => [
+                id,
+                coin?.quote?.USD?.price,
+              ]),
+            ),
+          ),
+    symbolFallback.length && !isPastDate
+      ? fetchCmcQuotes(`symbol=${symbolFallback.join(",")}`)
+      : {},
+  ]);
 
   // Extract prices in USD
   const usdPrices = {};
-  for (const sym of allSymbols) {
-    if (data[sym] && data[sym][0]?.quote?.USD?.price) {
-      usdPrices[sym] = Number(data[sym][0].quote.USD.price);
+  for (const [sym, cmcId] of Object.entries(cmcIdBySymbol)) {
+    const price = idPrices[cmcId];
+    if (price) {
+      usdPrices[sym] = Number(price);
+    } else {
+      console.warn(
+        `[CRYPTO BATCH] Price missing from CMC for token "${sym}" (id ${cmcId}).`,
+      );
+    }
+  }
+  for (const sym of symbolFallback) {
+    const matches = symbolData[sym] || [];
+    if (matches.length > 1) {
+      console.warn(
+        `[CRYPTO BATCH] Ambiguous symbol "${sym}" (${matches.length} CMC matches, using first). Set security_master.source_id to the CMC id.`,
+      );
+    }
+    if (matches[0]?.quote?.USD?.price) {
+      usdPrices[sym] = Number(matches[0].quote.USD.price);
     } else {
       console.warn(`[CRYPTO BATCH] Price missing from CMC for token "${sym}".`);
     }

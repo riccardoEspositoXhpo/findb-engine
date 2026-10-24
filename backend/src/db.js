@@ -113,7 +113,9 @@ export async function withTransaction(callback, { rollback = false } = {}) {
  * @returns {Promise<Array<Object>|Map<string, Object>>}
  */
 export async function importDatabase(tableName, asMap = false) {
-  const result = await pool.query(`SELECT * FROM ${tableName};`);
+  // Route through the active transaction client (if any) so dry-runs see uncommitted writes
+  const dbExecutor = getDbExecutor();
+  const result = await dbExecutor.query(`SELECT * FROM ${tableName};`);
   const rows = result.rows;
 
   if (!asMap) {
@@ -121,7 +123,7 @@ export async function importDatabase(tableName, asMap = false) {
   }
 
   // Resolve PK dynamically from information_schema (cached in RAM)
-  const pk = await utils.getTablePrimaryKey(pool, tableName);
+  const pk = await utils.getTablePrimaryKey(dbExecutor, tableName);
   return utils.dbToMap(rows, pk);
 }
 

@@ -1,4 +1,6 @@
-# FINDB SCHEMA DIVERGENCE LOG (October 2026)
+# FINDB DIVERGENCE LOG — GAS vs findb-engine (schema + behaviour)
+
+> Owned and maintained by Claude. Append a `- [TAG] description` line for every difference introduced by a migration.
 
 - [CATALOG] Centralized (breakdown, sector) into physical table `breakdown_catalog`.
 - [FK_BREAKDOWNS] `lookthrough_data`, `portfolio_breakdowns`, `aggregate_breakdowns`, `security_breakdowns` enforce Composite FK on `(breakdown, sector)`.
@@ -17,4 +19,26 @@
 - [UNIFIED-FX-RATES] Unificati i fogli storici `fxRateDaily` e `cryptoRateDaily` nella singola tabella normalizzata `fx_rates` con coppie (`base_currency`, `quote_currency`).
 - [MARKET_VALUE_EUR] new column everywhere lel
 - [HASH_MAP] la gestione dei dati in memoria sara hashmap al posto di arrayOfObjects
-- [SM_LOCATION] Renamed security_master location to source_id
+- [SM_LOCATION] Renamed security_master location to source_id- [FLOAT-OVER-NUMERIC] (migration 004) Tutte le colonne numeriche finanziarie passano a `DOUBLE PRECISION`; supersedes la parte `NUMERIC` di [INTEGRITY]. Non esistono CHECK di range sui pesi nello schema attuale (solo `end_date > start_date` e somme dei rendimenti). Arrotondamento fatto in JS (FX 6 dp, crypto 8 dp, prezzi 5 dp).
+- [SM_STABLECOIN_DROPPED] (migration 002) Rimossa `security_master.stablecoin`: lo status di stablecoin vive ora in `currencies.type = 'STABLECOIN'` (in GAS: colonna STABLECOIN = 'USD'/'EUR' + liste derivate USD_STABLECOINS / EUR_STABLECOINS).
+- [CURRENCY-SM-TRIGGER] (migration 003) Insert su `currencies` crea automaticamente la riga in `security_master` (`CASH_<ccy>` per FIAT, `<ccy>` per CRYPTO/STABLECOIN). In GAS cash e crypto erano inseriti a mano (o da `addSecurityToMaster` per Binance) e `cashMap` era derivata a runtime.
+- [FK-CASCADE] (migration 005) Tutte le FK ricreate con nome esplicito, `ON UPDATE CASCADE` + `ON DELETE RESTRICT` (SET NULL per risk_proxy / source_portfolio_id / linked_portfolio_id, CASCADE per aggregate_tree.parent_id).
+- [FX-PK-ORDER] (migration 004) PK di `fx_rates` riordinata in `(base_currency, quote_currency, date)` per lookup latest-per-pair.
+- [CRYPTO-QUOTE-USDC] Le crypto sono salvate solo come `TOKEN/USDC` + bridge sintetico `USDC/USD = 1`. In GAS `cryptoRateDaily` aveva coppie arbitrarie dagli header (BTCUSDT, ETHBTC, CROUSDC...) e bridge virtuali USDTUSD/USDCUSD.
+- [DELISTED-VIA-IS-ACTIVE] La costante GAS `DELISTED_CRYPTO` (pair -> data delisting) è sostituita da `currencies.is_active`. Nessuna data di delisting: le rate storiche restano, quelle nuove smettono di essere scaricate.
+- [FX-NO-FALLBACK] FX e crypto non fanno più fallback al valore precedente quando una coppia manca (GAS copiava l'ultimo rate disponibile). La coppia viene saltata con warning; se ne occupa la QC.
+- [FX-WEEKEND] Weekend: l'engine usa `/latest` e verifica che il fixing sia quello del venerdì, altrimenti abortisce. GAS scriveva silenziosamente qualunque fixing `/latest` restituisse.
+- [PRICE-SOURCES] Sorgenti prezzo supportate: EODHD, YAHOO (libreria yahoo-finance2, non più scraping Cheerio), TRUSTNET (AGN4648, sostituisce PAGEPIXELS + OCR), BOT/BTP (scraper Borsa Italiana). Eliminate: GOOGLEFINANCE e IMPORTXML (formule sheet), GDRIVE (vinovest / intesaInvest), PAGEPIXELS, PIR_50, REMOTE_CODE. EUROTLX / BORSA_ITALIANA / MORNINGSTAR non hanno ancora una route.
+- [PRICE-BACKDATE-PENDING] Prezzi con data storica vengono solo loggati: in GAS settavano le Script Properties `SECURITY_<id>_runStartDate` / `PORTFOLIO_<id>_runStartDate` per rilanciare i ricalcoli. Meccanismo non ancora portato.
+- [LEDGER-IDENTITY-PK] `transactions` e `capital_flows` hanno PK identity (`transaction_id`, `capital_flow_id`) + `external_id` per gli ID del broker. In GAS `ID` era max(ID per portfolio)+1 oppure l'ID del broker, e il dedup avveniva sulla chiave composita di SHEET_KEYS.
+- [LEDGER-CCY-CODES] `transactions.counter_currency` / `fee_currency` sono codici valuta (`EUR`, `USDT`); in GAS erano SECURITY_ID cash (`CASH_EUR`, `USDT`). `FEES` rinominato `fee`.
+- [RISK-LONG-FORMAT] `security_risk` / `portfolio_risk` / `aggregate_risk` sono in formato long `(id, date, metric, value)`; in GAS erano wide (una colonna per metrica: VOLATILITY_1Y, VAR_DLY_95, ..., *_EUR).
+- [TABLE-RENAMES] `navReturn` -> `portfolio_nav_return`, `aggregateNavReturn` -> `aggregate_nav_return`, `recurringFlows` -> `recurring_flows` (con PK identity), resto camelCase -> snake_case.
+- [UPSERT-NOT-BUCKET-REPLACE] `replaceDataInDb` fa upsert per PK e non cancella mai. In GAS `replaceDataInSheet` sostituiva l'intero bucket di SHEET_KEYS (es. tutte le positions di un portfolio-day, tutti i settori di un breakdown): le righe obsolete vanno cancellate esplicitamente.
+- [NO-HISTORY-SPLIT] Niente più spreadsheet di history (HISTORY_YEAR = 2025): tutta la storia in un'unica tabella; vanno tolti i guard "Cannot compute performance for dates prior and including year 2025".
+- [ISO-DATES] Le date sono ISO `YYYY-MM-DD` (colonne DATE); in GAS erano stringhe `Date.toDateString()` ("Fri Oct 24 2026") in un foglio con timezone Europe/Rome. L'engine usa i getter UTC.
+- [PORTFOLIO-TYPE-CRYPTO-GAP] Il CHECK su `portfolios.portfolio_type` non include "Cryptocurrency Investment", che GAS usa per calendario rischio 365gg e redditi da cripto-attività. DA DECIDERE: estendere il CHECK o usare `fiscal_regime = 'DICHIARATIVO_CRYPTO'`.
+- [NOT-YET-MODELLED] Ancora senza tabella: `income`, `closedLots`, `openLots`, `transferredLots`, `taxLots`, `productionLogs`, `eventsForm`.
+- [CRYPTO-CMC-ID] (2026-10-24) `security_master.source_id` delle crypto/stablecoin contiene il **CoinMarketCap id**; `calculateCryptoDailyFx` quota per `id` e usa il lookup per `symbol` solo come fallback (con warning se ambiguo). In GAS la quotazione era per simbolo (`[0]` del risultato) → collisioni di ticker. Mappati 108 token. Note: TON = "Gram (prev. Toncoin)" id 11419; MATIC punta a POL id 28321 (migrazione 1:1); AI = Sleepless AI 28846; BMT = Bubblemaps 35214; GUN = GUNZ, HOME = Defi App, SHELL = MyShell, ERA = Caldera, SOMI = Somnia, STO = StakeStone (i `currency_name` nel DB per questi sono obsoleti).
+- [CRYPTO-PAST-DATE] (2026-10-24) Se `calculateCryptoDailyFx` gira per una data passata usa `quotes/historical` (chiusura giornaliera = quote delle 00:00 UTC di D+1) invece di `quotes/latest`; i token senza CMC id vengono saltati. In produzione (data odierna, ~19:00 UTC) resta lo snapshot `latest`. GAS ignorava la data per le crypto.
+- [CRYPTO-BACKFILL-2026-10] (2026-10-24) Corrette 133 righe `fx_rates` `*/USDC` (solo UPDATE): AI, TON, BETA dal 2026-10-11 al 2026-10-23 (collisioni di ticker) e tutti i token per il 2026-10-12 (scritto il 10-22 con prezzi latest). Valori = chiusura CMC per id. Non toccati: RWUSD e SIGN al 2026-10-12 (nessuna storia CMC), MBOX 2026-10-23 (differenza da timing, crash reale).

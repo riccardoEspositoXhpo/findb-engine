@@ -152,7 +152,7 @@ export async function fetchFromYahoo(sec, targetDate) {
  * @param {Date|string} targetDate - Valuation date
  * @returns {Promise<{security_id: string, date: string, price: number}|null>}
  */
-export async function fetchBorsaItaliana(sec, targetDate) {
+export async function fetchFromBorsaItaliana(sec, targetDate) {
   const secId = sec.security_id;
   const source = (sec.source || "").trim().toUpperCase();
   // Prefer source_id (e.g. ISIN or Morningstar ID) for URL building, fallback to security_id
@@ -163,8 +163,15 @@ export async function fetchBorsaItaliana(sec, targetDate) {
     // --------------------------------------------------
     // Route: Borsa Italiana (BTP, BOT, EUROTLX, BORSA_ITALIANA)
     // --------------------------------------------------
-    const routeKey = SCRAPER_ROUTES[source];
+    const routeKey = source;
     const cfg = SCRAPER_ROUTES[routeKey];
+
+    if (!cfg) {
+      console.warn(
+        `[HTML Scraper] No scraper route configured for source '${source}' (${secId})`,
+      );
+      return null;
+    }
 
     const res = await fetch(cfg.url(lookupId), {
       headers: HTTP_HEADERS,
@@ -273,15 +280,15 @@ export async function fetchSecurityPrice(sec, targetDate = new Date()) {
     case "TRUSTNET":
       return fetchFromTrustnet(sec, targetDate);
     case "BOT":
-      return fetchFromHtmlScraper(sec, targetDate);
+      return fetchFromBorsaItaliana(sec, targetDate);
     case "BTP":
-      return fetchFromHtmlScraper(sec, targetDate);
+      return fetchFromBorsaItaliana(sec, targetDate);
     case "EUROTLX":
-      return fetchFromHtmlScraper(sec, targetDate);
+      return fetchFromBorsaItaliana(sec, targetDate);
     case "BORSA_ITALIANA":
-      return fetchFromHtmlScraper(sec, targetDate);
+      return fetchFromBorsaItaliana(sec, targetDate);
     case "MORNINGSTAR":
-      return fetchFromHtmlScraper(sec, targetDate);
+      return fetchFromBorsaItaliana(sec, targetDate);
     default:
       console.warn(
         `[PRICE PROVIDERS] Unsupported source '${source}' for ${sec.security_id}`,
