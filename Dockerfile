@@ -1,4 +1,5 @@
 FROM node:24-slim
+ENV TZ=UTC
 
 WORKDIR /usr/src/app
 

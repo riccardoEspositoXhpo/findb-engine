@@ -2,6 +2,7 @@
 // Data conversion utilities and schema introspection (ESM)
 export const utils = {
   getTablePrimaryKey,
+  getTableReplaceBlock,
   dbToMap,
   mapToDb,
   formatDateToISO,
@@ -124,6 +125,43 @@ async function getTablePrimaryKey(dbClient, tableName) {
   return pkDef;
 }
 
+// In-memory cache for replace blocks: Map<tableName, string[] | null>
+const replaceBlockCache = new Map();
+
+/**
+ * Reads the table's replace block from its "smart comment" (migration 007), with RAM caching.
+ * COMMENT ON TABLE positions IS '{"replace_block": ["date", "portfolio_id"]}'
+ * Non-JSON comments or comments without replace_block mean no block (plain upsert).
+ * Equivalent of SHEET_KEYS[sheet].replacement in // global.gs, but declared in the schema.
+ *
+ * @param {Object} dbClient - pg pool or client instance
+ * @param {string} tableName - Target table name
+ * @returns {Promise<string[]|null>} Block columns, or null if the table has no block
+ */
+async function getTableReplaceBlock(dbClient, tableName) {
+  if (replaceBlockCache.has(tableName)) {
+    return replaceBlockCache.get(tableName);
+  }
+
+  const res = await dbClient.query(
+    `SELECT obj_description(to_regclass($1), 'pg_class') AS comment;`,
+    [tableName],
+  );
+
+  let replaceBlock = null;
+  try {
+    const parsed = JSON.parse(res.rows[0]?.comment ?? "null");
+    if (Array.isArray(parsed?.replace_block) && parsed.replace_block.length > 0) {
+      replaceBlock = parsed.replace_block;
+    }
+  } catch {
+    // Plain-text comment (e.g. 'test'): not a smart comment, no block
+  }
+
+  replaceBlockCache.set(tableName, replaceBlock);
+  return replaceBlock;
+}
+
 /**
  * Converts an array of database record objects into an in-memory Map keyed by PK.
  * Supports both single keys and composite primary keys (using '___' delimiter).
@@ -195,6 +233,9 @@ function formatDateToISO(inputDate = new Date(), inputFormat = "DD/MM/YYYY") {
   // Otherwise, handle string-based parsing based on inputFormat
   const strDate = String(inputDate).trim();
   if (!strDate) return null;
+
+  // Already ISO (YYYY-MM-DD...): pass through, otherwise the default DD/MM/YYYY mapping scrambles it
+  if (/^\d{4}-\d{2}-\d{2}/.test(strDate)) return strDate.slice(0, 10);
 
   // Support alternative separators like hyphens or dots by normalizing to slashes
   const normalizedStrDate = strDate.replace(/[-.]/g, "/");

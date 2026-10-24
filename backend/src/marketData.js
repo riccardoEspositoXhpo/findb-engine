@@ -7,6 +7,8 @@ export const marketData = {
   run,
   calculateDailyFx,
   calculateCryptoDailyFx,
+  loadFxRates,
+  currencyConverter,
 };
 
 /**
@@ -505,6 +507,183 @@ export async function calculateCryptoDailyFx(targetDate = new Date()) {
   return fxRecords;
 }
 
+// In-memory fx cache (replaces GAS cachedDatabase for fxRateDaily/cryptoRateDaily):
+// "BASE/QUOTE" -> [{ date: "YYYY-MM-DD", rate }] sorted by date ascending
+let fxCache = null;
+// Currency graph: currency -> Map(neighbour -> [{ pair, inverse }]) (a hop can be served by A/B or by 1 / B/A)
+let fxGraph = null;
+// "FROM>TO" -> routes that resolved at least once (shortest first, then date-specific fallbacks)
+const fxRouteCache = new Map();
+const fxWarnings = new Set();
+
+// Synthetic bridge between the stablecoin quote and fiat, valid for any date (GAS: virtual USDCUSD = 1).
+// Stored USDC/USD rows exist only since 2026-10-11; history before that is quoted vs USDT/USDC with no fiat link.
+const FX_CONSTANT_PAIRS = { "USDC/USD": 1 };
+
+/**
+ * Loads the whole fx_rates table into memory. Must run before currencyConverter.
+ * Without force it's a no-op when the cache is already loaded, so every consumer (valuation, aggregates, tax...)
+ * can just call it first thing. Whoever writes fx_rates (marketData.run) reloads with { force: true }.
+ * Goes through the active transaction, so dry runs see the rates written earlier in the same run.
+ *
+ * @param {Object} [options={}]
+ * @param {boolean} [options.force=false] - Reload even if the cache is already loaded
+ */
+export async function loadFxRates({ force = false } = {}) {
+  if (fxCache && !force) return;
+
+  const { rows } = await query(`
+    SELECT to_char(date, 'YYYY-MM-DD') AS date, base_currency, quote_currency, rate
+    FROM fx_rates
+    ORDER BY base_currency, quote_currency, date`);
+
+  fxCache = new Map();
+  for (const row of rows) {
+    const pair = `${row.base_currency}/${row.quote_currency}`;
+    if (!fxCache.has(pair)) fxCache.set(pair, []);
+    fxCache.get(pair).push({ date: row.date, rate: Number(row.rate) });
+  }
+
+  fxGraph = new Map();
+  const addEdge = (from, to, pair, inverse) => {
+    if (!fxGraph.has(from)) fxGraph.set(from, new Map());
+    const neighbours = fxGraph.get(from);
+    if (!neighbours.has(to)) neighbours.set(to, []);
+    neighbours.get(to).push({ pair, inverse });
+  };
+  for (const pair of new Set([...fxCache.keys(), ...Object.keys(FX_CONSTANT_PAIRS)])) {
+    const [base, quote] = pair.split("/");
+    addEdge(base, quote, pair, false);
+    addEdge(quote, base, pair, true);
+  }
+
+  fxRouteCache.clear();
+  fxWarnings.clear();
+  console.log(`[FX CONVERTER] Loaded ${rows.length} rates across ${fxCache.size} pairs.`);
+}
+
+/** Latest { date, rate } on or before dateStr (binary search, no staleness limit), or null. */
+function getLatestFxRate(pair, dateStr) {
+  if (pair in FX_CONSTANT_PAIRS) return { date: dateStr, rate: FX_CONSTANT_PAIRS[pair] };
+
+  const series = fxCache.get(pair);
+  if (!series || series[0].date > dateStr) return null;
+
+  let lo = 0;
+  let hi = series.length - 1;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (series[mid].date <= dateStr) lo = mid;
+    else hi = mid - 1;
+  }
+  return series[lo];
+}
+
+/**
+ * Rate for one hop (from -> to) on a date: tries every stored direction (A/B, or 1 / B/A) and keeps the most recent
+ * observation on or before the date. Null if no direction has data yet.
+ */
+function getHopRate(from, to, dateStr) {
+  let best = null;
+  for (const { pair, inverse } of fxGraph.get(from)?.get(to) || []) {
+    const observation = getLatestFxRate(pair, dateStr);
+    if (observation && (!best || observation.date > best.date)) {
+      best = { date: observation.date, rate: inverse ? 1 / observation.rate : observation.rate };
+    }
+  }
+  return best ? best.rate : null;
+}
+
+/**
+ * Shortest conversion route (BFS) through the currency graph. With dateStr, only hops that have a rate on or
+ * before that date are walked (history is quoted vs USDT, recent data vs USDC).
+ * Migrated from buildCurrencyGraph + findShortestCurrencyPath in // fxRates.gs
+ *
+ * @returns {Array<string>|null} Currencies along the route, e.g. ["BTC", "USDC", "USD", "EUR"]
+ */
+function findFxRoute(currencyFrom, currencyTo, dateStr = null) {
+  const visited = new Set([currencyFrom]);
+  const queue = [[currencyFrom]];
+  while (queue.length > 0) {
+    const route = queue.shift();
+    const node = route[route.length - 1];
+    if (node === currencyTo) return route;
+
+    for (const neighbour of fxGraph.get(node)?.keys() || []) {
+      if (visited.has(neighbour)) continue;
+      if (dateStr && getHopRate(node, neighbour, dateStr) === null) continue;
+      visited.add(neighbour);
+      queue.push([...route, neighbour]);
+    }
+  }
+  return null;
+}
+
+/** Multiplies the hop rates along a route, or null if any hop has no rate on or before the date. */
+function rateAlongRoute(route, dateStr) {
+  let rate = 1;
+  for (let i = 0; i < route.length - 1; i++) {
+    const hopRate = getHopRate(route[i], route[i + 1], dateStr);
+    if (hopRate === null) return null;
+    rate *= hopRate;
+  }
+  return rate;
+}
+
+function warnFxOnce(key, message) {
+  if (fxWarnings.has(key)) return;
+  fxWarnings.add(key);
+  console.warn(message);
+}
+
+/**
+ * Converts any fiat/crypto/stablecoin currency into any other for a date: direct pair, inverse pair, or the shortest
+ * chain (e.g. SOL -> USDC -> USD -> EUR). Each hop uses its latest rate on or before the date (no staleness limit).
+ * Stablecoins use their real market rate (USDT via USDT/USDC); only USDC/USD is a constant 1.
+ * Migrated from currencyConverter in // fxRates.gs
+ *
+ * @param {string} currencyFrom - Currency code (not a SECURITY_ID: CASH_EUR -> EUR is the caller's job)
+ * @param {string} currencyTo - Currency code
+ * @param {Date|string} [date=new Date()] - Valuation date
+ * @returns {number|null} Rate (1 unit of currencyFrom in currencyTo), or null if unresolvable (GAS returned 0)
+ */
+export function currencyConverter(currencyFrom, currencyTo, date = new Date()) {
+  if (!fxCache) {
+    throw new Error("[FX CONVERTER] fx cache not loaded: call loadFxRates() first.");
+  }
+  if (currencyFrom === currencyTo) return 1;
+
+  const dateStr = utils.formatDateToISO(date);
+  const routeKey = `${currencyFrom}>${currencyTo}`;
+
+  // Fast path: routes that already worked for this pair, starting with the shortest one ignoring dates
+  if (!fxRouteCache.has(routeKey)) {
+    const shortestRoute = findFxRoute(currencyFrom, currencyTo);
+    fxRouteCache.set(routeKey, shortestRoute ? [shortestRoute] : []);
+  }
+  const knownRoutes = fxRouteCache.get(routeKey);
+  if (knownRoutes.length === 0) {
+    warnFxOnce(routeKey, `[FX CONVERTER] No conversion route between ${currencyFrom} and ${currencyTo}.`);
+    return null;
+  }
+  for (const route of knownRoutes) {
+    const rate = rateAlongRoute(route, dateStr);
+    if (rate !== null) return rate;
+  }
+
+  // Slow path: re-route using only hops with data on or before the date (e.g. history quoted vs USDT)
+  const datedRoute = findFxRoute(currencyFrom, currencyTo, dateStr);
+  if (!datedRoute) {
+    warnFxOnce(
+      `${routeKey}@${dateStr.slice(0, 7)}`,
+      `[FX CONVERTER] No ${currencyFrom} -> ${currencyTo} rate on or before ${dateStr}.`,
+    );
+    return null;
+  }
+  knownRoutes.push(datedRoute);
+  return rateAlongRoute(datedRoute, dateStr);
+}
+
 /**
  * Master Market Data runner for daily batch execution.
  * Triggers BCE and CoinMarketCap FX pipelines concurrently via Promise.all.
@@ -524,6 +703,9 @@ export async function run(targetDate = new Date()) {
     calculateCryptoDailyFx(targetDate),
     calculatePrices(targetDate),
   ]);
+
+  // New rates were just written: reload the in-memory fx cache for everything downstream
+  await loadFxRates({ force: true });
 
   const elapsedSeconds = ((performance.now() - startTime) / 1000).toFixed(2);
   console.log(

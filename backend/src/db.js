@@ -128,9 +128,12 @@ export async function importDatabase(tableName, asMap = false) {
 }
 
 /**
- * Universal UPSERT replacing legacy replaceDataInSheet.
- * Atomically inserts new records or updates existing rows on PK conflict.
- * Automatically hooks into the active AsyncLocalStorage transaction client when running.
+ * Universal block replace replacing legacy replaceDataInSheet.
+ * If the table declares a replace block (smart comment, migration 007), every existing row of each block present in
+ * the incoming data is deleted first (e.g. a security sold off a portfolio-day disappears), then rows are inserted.
+ * Without a block, the block is the PK itself: plain UPSERT (insert or update on PK conflict).
+ * Automatically hooks into the active AsyncLocalStorage transaction client when running; a block replace outside a
+ * transaction opens its own, so the DELETE never commits without its INSERT.
  *
  * @param {Array<Object>|Map<string, Object>} data - Records to persist
  * @param {string} tableName - Target PostgreSQL table name
@@ -147,9 +150,39 @@ export async function replaceDataInDb(data, tableName, client = null) {
     return 0;
   }
 
-  // 3. Discover Primary Key columns dynamically via cached metadata
+  // 3. Discover Primary Key and replace block dynamically via cached metadata
   const pkDef = await utils.getTablePrimaryKey(dbExecutor, tableName);
   const pkColumns = Array.isArray(pkDef) ? pkDef : [pkDef];
+  const replaceBlock = await utils.getTableReplaceBlock(dbExecutor, tableName);
+
+  if (replaceBlock) {
+    // DELETE + INSERT must be atomic: re-enter inside our own transaction if none is active
+    if (dbExecutor === pool) {
+      return withTransaction(() => replaceDataInDb(rows, tableName));
+    }
+
+    // Distinct blocks in the incoming data, e.g. PROFOND @ 2026-10-01
+    const blocks = [
+      ...new Map(
+        rows.map((row) => {
+          const block = Object.fromEntries(replaceBlock.map((col) => [col, row[col] ?? null]));
+          return [JSON.stringify(block), block];
+        }),
+      ).values(),
+    ];
+    const blockColumns = replaceBlock.join(", ");
+    const deleted = await dbExecutor.query(
+      `
+      DELETE FROM ${tableName}
+      WHERE (${blockColumns}) IN (
+        SELECT ${blockColumns} FROM json_populate_recordset(NULL::${tableName}, $1)
+      );`,
+      [JSON.stringify(blocks)],
+    );
+    console.log(
+      `[DB REPLACE] Cleared ${blocks.length} block(s) of (${blockColumns}) in "${tableName}": ${deleted.rowCount} rows deleted.`,
+    );
+  }
 
   // 4. Extract unique columns present across the incoming dataset
   const columns = Object.keys(rows[0]);

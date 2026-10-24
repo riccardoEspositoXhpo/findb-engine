@@ -1,4 +1,8 @@
 // config.js (Root Level - Single Source of Truth)
+// Force UTC on every machine (pg turns DATE columns into Dates at local midnight → off-by-one days outside UTC).
+// Committed here, not in .env, so a fresh clone gets it. Node applies TZ changes at runtime.
+process.env.TZ = "UTC";
+
 export const config = {
   // Runtime flags
   dryRun: process.env.DRY_RUN === "true",

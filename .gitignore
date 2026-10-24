@@ -34,3 +34,5 @@ pgdata/
 Thumbs.db
 .vscode/
 .idea/
+# Offline exports/snapshots of the legacy GAS spreadsheet (personal financial data)
+claude/data/
