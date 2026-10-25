@@ -104,6 +104,32 @@ export async function withTransaction(callback, { rollback = false } = {}) {
   }
 }
 
+let savepointCounter = 0;
+
+/**
+ * Runs callback all-or-nothing without touching the outer flow: inside an active transaction (dry run) it uses a
+ * SAVEPOINT, so a failure rolls back only this callback and the outer transaction stays usable; outside one (prod)
+ * it opens its own transaction. Used e.g. per event, so a half-processed event never leaves rows behind.
+ *
+ * @param {Function} callback - async work to run atomically
+ * @returns {Promise<any>} callback result
+ */
+export async function withSavepoint(callback) {
+  const executor = getDbExecutor();
+  if (executor === pool) return withTransaction(callback);
+
+  const name = `sp_${++savepointCounter}`;
+  await executor.query(`SAVEPOINT ${name};`);
+  try {
+    const result = await callback();
+    await executor.query(`RELEASE SAVEPOINT ${name};`);
+    return result;
+  } catch (error) {
+    await executor.query(`ROLLBACK TO SAVEPOINT ${name};`);
+    throw error;
+  }
+}
+
 /**
  * SELECT * - Fetches all records from a table.
  * Replicates legacy importDatabase() behavior with optional O(1) Map hydration.
@@ -128,7 +154,7 @@ export async function importDatabase(tableName, asMap = false) {
 }
 
 /**
- * Universal block replace replacing legacy replaceDataInSheet.
+ * Universal block replace.
  * If the table declares a replace block (smart comment, migration 007), every existing row of each block present in
  * the incoming data is deleted first (e.g. a security sold off a portfolio-day disappears), then rows are inserted.
  * Without a block, the block is the PK itself: plain UPSERT (insert or update on PK conflict).
@@ -165,7 +191,9 @@ export async function replaceDataInDb(data, tableName, client = null) {
     const blocks = [
       ...new Map(
         rows.map((row) => {
-          const block = Object.fromEntries(replaceBlock.map((col) => [col, row[col] ?? null]));
+          const block = Object.fromEntries(
+            replaceBlock.map((col) => [col, row[col] ?? null]),
+          );
           return [JSON.stringify(block), block];
         }),
       ).values(),
@@ -184,8 +212,20 @@ export async function replaceDataInDb(data, tableName, client = null) {
     );
   }
 
-  // 4. Extract unique columns present across the incoming dataset
-  const columns = Object.keys(rows[0]);
+  // 4. Columns come from the table schema: every key in the data must be a real column (typos fail loudly), and
+  // only the columns present in the data are written, so identity / default / untouched columns are left alone.
+  // A row missing a column that other rows have gets NULL for it.
+  const tableColumns = await utils.getTableColumns(dbExecutor, tableName);
+  const dataKeys = new Set(rows.flatMap((row) => Object.keys(row)));
+  const unknownKeys = [...dataKeys].filter(
+    (key) => !tableColumns.includes(key),
+  );
+  if (unknownKeys.length > 0) {
+    throw new Error(
+      `[DB UPSERT] "${tableName}" has no column(s): ${unknownKeys.join(", ")}`,
+    );
+  }
+  const columns = tableColumns.filter((col) => dataKeys.has(col));
   const nonPkColumns = columns.filter((col) => !pkColumns.includes(col));
 
   // 5. Build conflict resolution clause

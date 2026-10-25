@@ -514,7 +514,6 @@ let fxCache = null;
 let fxGraph = null;
 // "FROM>TO" -> routes that resolved at least once (shortest first, then date-specific fallbacks)
 const fxRouteCache = new Map();
-const fxWarnings = new Set();
 
 // Synthetic bridge between the stablecoin quote and fiat, valid for any date (GAS: virtual USDCUSD = 1).
 // Stored USDC/USD rows exist only since 2026-10-11; history before that is quoted vs USDT/USDC with no fiat link.
@@ -558,7 +557,6 @@ export async function loadFxRates({ force = false } = {}) {
   }
 
   fxRouteCache.clear();
-  fxWarnings.clear();
   console.log(`[FX CONVERTER] Loaded ${rows.length} rates across ${fxCache.size} pairs.`);
 }
 
@@ -630,12 +628,6 @@ function rateAlongRoute(route, dateStr) {
   return rate;
 }
 
-function warnFxOnce(key, message) {
-  if (fxWarnings.has(key)) return;
-  fxWarnings.add(key);
-  console.warn(message);
-}
-
 /**
  * Converts any fiat/crypto/stablecoin currency into any other for a date: direct pair, inverse pair, or the shortest
  * chain (e.g. SOL -> USDC -> USD -> EUR). Each hop uses its latest rate on or before the date (no staleness limit).
@@ -645,7 +637,8 @@ function warnFxOnce(key, message) {
  * @param {string} currencyFrom - Currency code (not a SECURITY_ID: CASH_EUR -> EUR is the caller's job)
  * @param {string} currencyTo - Currency code
  * @param {Date|string} [date=new Date()] - Valuation date
- * @returns {number|null} Rate (1 unit of currencyFrom in currencyTo), or null if unresolvable (GAS returned 0)
+ * @returns {number} Rate (1 unit of currencyFrom in currencyTo). Throws if unresolvable (GAS returned 0): a missing
+ *   rate must never silently turn a value into 0.
  */
 export function currencyConverter(currencyFrom, currencyTo, date = new Date()) {
   if (!fxCache) {
@@ -663,8 +656,7 @@ export function currencyConverter(currencyFrom, currencyTo, date = new Date()) {
   }
   const knownRoutes = fxRouteCache.get(routeKey);
   if (knownRoutes.length === 0) {
-    warnFxOnce(routeKey, `[FX CONVERTER] No conversion route between ${currencyFrom} and ${currencyTo}.`);
-    return null;
+    throw new Error(`[FX CONVERTER] No conversion route between ${currencyFrom} and ${currencyTo}.`);
   }
   for (const route of knownRoutes) {
     const rate = rateAlongRoute(route, dateStr);
@@ -674,11 +666,7 @@ export function currencyConverter(currencyFrom, currencyTo, date = new Date()) {
   // Slow path: re-route using only hops with data on or before the date (e.g. history quoted vs USDT)
   const datedRoute = findFxRoute(currencyFrom, currencyTo, dateStr);
   if (!datedRoute) {
-    warnFxOnce(
-      `${routeKey}@${dateStr.slice(0, 7)}`,
-      `[FX CONVERTER] No ${currencyFrom} -> ${currencyTo} rate on or before ${dateStr}.`,
-    );
-    return null;
+    throw new Error(`[FX CONVERTER] No ${currencyFrom} -> ${currencyTo} rate on or before ${dateStr}.`);
   }
   knownRoutes.push(datedRoute);
   return rateAlongRoute(datedRoute, dateStr);

@@ -10,13 +10,22 @@ import { pool, withTransaction } from "../src/db.js";
 import { config } from "../config.js";
 import { overnightQC } from "../src/overnightQC.js";
 import { marketData } from "../src/marketData.js";
+import { events } from "../src/events.js";
+import { scrapeEmails } from "../src/scrapeEmails.js";
 import { sendQcEmail } from "../src/qcNotification.js";
 
 async function executePipeline() {
   // 1. Master Market Data Pipeline (fx rates, crypto, prices)
   await marketData.run(config.date);
 
-  // 2. Overnight Quality Control Engine
+  // 2. Emails -> events (bank / card balances). A Gmail failure is logged, not fatal.
+  await scrapeEmails.run(config.date);
+
+  // 3. Events: generate automatic events (scheduled_events, recurring_flows), then process every pending event
+  // into the ledger. Must run before valuation, which reads the ledger.
+  await events.run(config.date);
+
+  // 4. Overnight Quality Control Engine
   // In dry-run mode, QC queries the same uncommitted transaction client and verifies actual data
   const qcResults = await overnightQC.runAll(config.date);
 
@@ -31,7 +40,7 @@ async function executePipeline() {
     `[QC ENGINE] ${passed}/${total} checks passed (${criticals} critical failures).`,
   );
 
-  // 3. Dispatch QC status digest (suppressed during CI dry-run)
+  // 5. Dispatch QC status digest (suppressed during CI dry-run)
   if (config.dryRun) {
     console.log(
       "[FinDB Daily Batch] DRY-RUN active: Skipping email transmission.",

@@ -193,9 +193,8 @@ CREATE TABLE IF NOT EXISTS recurring_flows (
     principal NUMERIC,
     tax NUMERIC,
     outstanding_amount NUMERIC,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    CONSTRAINT chk_rec_flow_payment_sum CHECK (abs((principal + interest + tax) - total_amount) < 0.00001)
-    CONSTRAINT chk_rec_flow_amount_sum CHECK (abs((principal + interest + tax) - total_amount) < 0.00001)
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_recurring_flows_payment CHECK (abs(payment - (principal + interest)) < 0.005)
 );
 
 

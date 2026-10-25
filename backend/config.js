@@ -18,10 +18,13 @@ export const config = {
   // API Keys
   cmcApiKey: process.env.CMC_API_KEY || null,
   eodhdToken: process.env.EODHD_TOKEN || null,
+  krakenApiKey: process.env.KRAKEN_API_KEY || null,
+  krakenPrivateKey: process.env.KRAKEN_PRIVATE_KEY || null,
+
   // Defaults
   date: new Date(),
 
   // your email
-  targetEmailRecipient: process.env.TARGET_EMAIL_RECIPIENT,
-  smtpPassword: process.env.SMTP_PASS,
+  targetEmailRecipient: process.env.TARGET_EMAIL_RECIPIENT, // your Gmail: QC email to + from, IMAP login (scrapeEmails)
+  smtpPassword: process.env.SMTP_PASS, // Gmail app password (works for SMTP and IMAP)
 };

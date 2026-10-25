@@ -306,7 +306,7 @@ export async function sendQcEmail(qcResults, targetDate = new Date()) {
   console.log(`[QC NOTIFIER] Dispatching QC digest to ${recipient}...`);
 
   await transporter.sendMail({
-    from: `"FinDB Engine" <${process.env.SMTP_USER}>`,
+    from: `"FinDB Engine" <${config.targetEmailRecipient}>`,
     to: recipient,
     subject: subject,
     html: htmlBody,

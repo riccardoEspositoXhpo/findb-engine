@@ -3,9 +3,11 @@
 export const utils = {
   getTablePrimaryKey,
   getTableReplaceBlock,
+  getTableColumns,
   dbToMap,
   mapToDb,
   formatDateToISO,
+  toRomeDateISO,
   fetchWithRetry,
   convertItalianFloat,
   doesItRunToday,
@@ -125,6 +127,35 @@ async function getTablePrimaryKey(dbClient, tableName) {
   return pkDef;
 }
 
+// In-memory cache for table columns: Map<tableName, string[]>
+const columnsCache = new Map();
+
+/**
+ * Queries PostgreSQL catalog for the table's column names (in table order), with RAM caching.
+ * @param {Object} dbClient - pg pool or client instance
+ * @param {string} tableName - Target table name
+ * @returns {Promise<string[]>} Column names
+ */
+async function getTableColumns(dbClient, tableName) {
+  if (columnsCache.has(tableName)) {
+    return columnsCache.get(tableName);
+  }
+
+  const res = await dbClient.query(
+    `SELECT column_name FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = $1
+     ORDER BY ordinal_position;`,
+    [tableName],
+  );
+  const columns = res.rows.map((r) => r.column_name);
+  if (columns.length === 0) {
+    throw new Error(`[COLUMNS ERROR] Table "${tableName}" not found`);
+  }
+
+  columnsCache.set(tableName, columns);
+  return columns;
+}
+
 // In-memory cache for replace blocks: Map<tableName, string[] | null>
 const replaceBlockCache = new Map();
 
@@ -203,6 +234,17 @@ function mapToDb(mapOrObject) {
     return Object.values(mapOrObject);
   }
   return [];
+}
+
+/**
+ * Calendar date (YYYY-MM-DD) of a timestamp in Europe/Rome: something at 00:30 Rome belongs to that Rome day, not
+ * to the previous UTC one (the process runs in UTC). For external timestamps: emails, broker ledgers.
+ *
+ * @param {Date|number|string} timestamp
+ * @returns {string} ISO date
+ */
+function toRomeDateISO(timestamp) {
+  return new Intl.DateTimeFormat("sv-SE", { timeZone: "Europe/Rome" }).format(new Date(timestamp));
 }
 
 // utilities.gs
