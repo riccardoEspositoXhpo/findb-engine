@@ -1,5 +1,6 @@
 // backend/utils.js
 // Data conversion utilities and schema introspection (ESM)
+import zlib from "zlib";
 export const utils = {
   getTablePrimaryKey,
   getTableReplaceBlock,
@@ -13,6 +14,7 @@ export const utils = {
   convertItalianFloat,
   doesItRunToday,
   readXls,
+  readPdfText,
 };
 
 /**
@@ -487,4 +489,70 @@ function readXls(buffer) {
     workbookSheets[name] = Array.from({ length: rows }, (_, r) => Array.from({ length: cols }, (_, c) => sheet.get(`${r},${c}`) ?? ""));
   });
   return workbookSheets;
+}
+
+/**
+ * Minimal PDF text extractor, no dependency: inflates the content streams and returns the strings drawn with Tj / TJ,
+ * one per line, in drawing order. Enough for machine-generated broker notes with standard fonts (Directa: Courier,
+ * WinAnsi, one Tj per table row with the spacing inside the string). Not for scans, CID fonts or reordered layouts.
+ *
+ * @param {Buffer} buffer - The .pdf file
+ * @returns {string} text, one drawn string per line
+ */
+function readPdfText(buffer) {
+  const raw = buffer.toString("latin1");
+  const lines = [];
+  const escapes = { n: "\n", r: "\r", t: "\t", b: "\b", f: "\f" };
+  // Literal string starting at content[i] === "(": balanced parentheses, backslash escapes (\n, \(, \ddd octal)
+  const readLiteral = (content, i) => {
+    let text = "";
+    let depth = 0;
+    for (i++; i < content.length; i++) {
+      const char = content[i];
+      if (char === "\\") {
+        const octal = content.slice(i + 1).match(/^[0-7]{1,3}/)?.[0];
+        if (octal) { text += String.fromCharCode(parseInt(octal, 8)); i += octal.length; }
+        else { text += escapes[content[i + 1]] ?? content[i + 1]; i++; }
+      } else if (char === "(") { depth++; text += char; }
+      else if (char === ")") { if (depth === 0) return [text, i + 1]; depth--; text += char; }
+      else text += char;
+    }
+    return [text, i];
+  };
+  const operatorAt = (content, i) => content.slice(i).match(/^\s*(\S{1,2})/)?.[1];
+
+  for (const match of raw.matchAll(/stream\r?\n/g)) {
+    const start = match.index + match[0].length;
+    const end = raw.indexOf("endstream", start);
+    if (end < 0) continue;
+    let content = raw.slice(start, end);
+    try {
+      content = zlib.inflateSync(Buffer.from(content, "latin1")).toString("latin1");
+    } catch {
+      // not compressed: used as is
+    }
+    if (!content.includes("BT") || !(content.includes("Tj") || content.includes("TJ"))) continue; // fonts, images...
+    // Text lives only inside BT ... ET blocks: scanning only there skips inline images (binary bytes, stray parentheses)
+    for (const block of content.matchAll(/(?:^|\s)BT\s([\s\S]*?)\sET(?=\s|$)/g)) scanText(block[1]);
+  }
+  return lines.join("\n");
+
+  function scanText(content) {
+    for (let i = 0; i < content.length; i++) {
+      if (content[i] === "(") {
+        const [text, next] = readLiteral(content, i);
+        if (operatorAt(content, next) === "Tj") lines.push(text);
+        i = next - 1;
+      } else if (content[i] === "[") {
+        const parts = [];
+        let j = i + 1;
+        while (j < content.length && content[j] !== "]") {
+          if (content[j] === "(") { const [text, next] = readLiteral(content, j); parts.push(text); j = next; }
+          else j++;
+        }
+        if (operatorAt(content, j + 1) === "TJ") lines.push(parts.join(""));
+        i = j;
+      }
+    }
+  }
 }

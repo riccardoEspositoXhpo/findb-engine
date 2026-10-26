@@ -10,6 +10,7 @@ export const scrapeEmails = {
   parseIntesaBalance,
   parseFideuramBalance,
   parseAmexBalance,
+  parseDirecta,
   readLabelAttachments,
 };
 
@@ -20,6 +21,7 @@ const EMAIL_SOURCES = {
   bancaIntesa: { portfolioId: "BANCA_INTESA", parse: parseIntesaBalance },
   fideuram: { portfolioId: "FIDEURAM", parse: parseFideuramBalance },
   amex: { portfolioId: "AMEX", parse: parseAmexBalance },
+  directa: { portfolioId: "DIRECTA", parse: parseDirecta },
 };
 
 /**
@@ -61,6 +63,7 @@ export async function run(targetDate = new Date()) {
 
       for (const email of emails) {
         const events = source.parse(email, source.portfolioId);
+        if (events === null) continue; // ignored on purpose (e.g. emails forwarded by the user)
         if (events.length === 0) {
           console.warn(`[SCRAPE EMAILS] ${label}: could not parse "${email.subject}" (${email.date}), skipped.`);
           summary.unparsed++;
@@ -81,11 +84,32 @@ export async function run(targetDate = new Date()) {
     await client.logout().catch(() => {});
   }
 
-  summary.created = await insertNewEvents(candidates, "email_message_id", (id) => String(id));
+  summary.created = await insertNewEvents(await dropRepeatedOrders(candidates), "email_message_id", (id) => String(id));
   console.log(
     `[SCRAPE EMAILS] Done: ${summary.read} emails read, ${summary.created} events created, ${summary.unparsed} unparsed.`,
   );
   return summary;
+}
+
+/**
+ * Broker notes can arrive more than once (Directa sent one copy of the same note per partial fill): events carrying
+ * event_metadata.order_id are kept once per order, across this run's emails and the events already saved. A repeated
+ * order with different numbers is logged (a correction would mean deleting and recreating the event by hand).
+ */
+async function dropRepeatedOrders(candidates) {
+  const { rows } = await query(`SELECT event_metadata ->> 'order_id' AS order_id, quantity, price FROM events WHERE event_metadata ? 'order_id';`);
+  const seen = new Map(rows.map((row) => [row.order_id, row]));
+  return candidates.filter((event) => {
+    const orderId = event.event_metadata?.order_id;
+    if (!orderId) return true;
+    const known = seen.get(orderId);
+    if (known && (Number(known.quantity) !== Number(event.quantity) || Math.abs(Number(known.price) - Number(event.price)) > 1e-9)) {
+      console.warn(`[SCRAPE EMAILS] order ${orderId} seen again with different numbers (${known.quantity} @ ${known.price} vs ${event.quantity} @ ${event.price}), kept the first.`);
+    }
+    if (known) return false;
+    seen.set(orderId, event);
+    return true;
+  });
 }
 
 /**
@@ -125,6 +149,7 @@ async function readLabel(client, label, dateStr) {
         subject: parsed.subject,
         // Bank notifications are HTML-only (no text part): fall back to the HTML stripped to text
         text: parsed.text || htmlToText(parsed.html || ""),
+        attachments: parsed.attachments.map(({ filename, contentType, content }) => ({ filename, contentType, content })),
       });
     }
     return emails;
@@ -221,4 +246,81 @@ export function parseFideuramBalance(email, portfolioId) {
 export function parseAmexBalance(email, portfolioId) {
   const balance = italianAmountAfter(email.text, "Saldo corrente[\\s\\S]{0,2000}?€");
   return balance === null ? [] : balanceEvent(email, portfolioId, -balance, "DEBT_EUR");
+}
+
+/**
+ * Directa (broker): two kinds of email in the label, everything else ignored.
+ * - "Conferma di accredito bonifico" -> INFLOW of "Importo" (English number format) on "Valuta" (dd/mm/yyyy)
+ * - "Nota informativa <order>" -> the PDF note of an executed order: PURCHASE (Acquisto) or SALE (Vendita, and
+ *   Liquidazione = redemption at maturity) on the execution date, quantity summed over the fills, price = Controvalore /
+ *   quantity, fees_override = Commissioni, event_metadata { order_id, tax_withheld = Ritenuta (capital gain tax
+ *   on sales) }. The PDF names the security by ISIN only: mapped with DIRECTA_ISINS (unknown ISIN = unparsed + warning).
+ * Forwarded copies ("Fwd: ...", sent by the user to others) return null: ignored, not counted as unparsed.
+ *
+ * @returns {Array<Object>|null} events
+ */
+export function parseDirecta(email, portfolioId) {
+  // ISIN -> security_id of the securities traded on Directa (add new ones here)
+  const DIRECTA_ISINS = {
+    CH1322071304: "CH1322071304",
+    CH1325429418: "CH1325429418",
+    IE00BK5BQT80: "VWCE",
+    DE000A0H0728: "EXXY",
+    IE00BL25JP72: "XDEM",
+    LU0478205379: "XBLC",
+    IE00BF540Z61: "GFA",
+    IE00BP3QZ601: "IS3Q",
+    IE00B1XNHC34: "INRG",
+    IE00BMW3QX54: "ROBO",
+    IE000YU9K6K2: "JEDI",
+    IE000NDWFGA5: "URNU",
+    IE00BYZK4776: "HEAL",
+    IE0002PG6CA6: "REMX",
+  };
+  const subject = email.subject ?? "";
+  if (/^\s*(fwd?|i)\s*:/i.test(subject)) return null;
+
+  if (/accredito bonifico/i.test(subject)) {
+    const amount = email.text.match(/Importo:\s*([\d.,]+)/)?.[1];
+    const valueDate = email.text.match(/Valuta:\s*(\d\d)\/(\d\d)\/(\d{4})/);
+    if (!amount || !valueDate) return [];
+    return [{
+      date: `${valueDate[3]}-${valueDate[2]}-${valueDate[1]}`,
+      event_type: "INFLOW",
+      portfolio_id: portfolioId,
+      quantity: Number(amount.replace(/,/g, "")),
+      event_metadata: {},
+    }];
+  }
+
+  if (!/nota informativa/i.test(subject)) return null;
+  const italian = (value) => Math.abs(Number((value ?? "0").replace(/\./g, "").replace(",", ".")));
+  const events = [];
+  for (const attachment of email.attachments.filter((a) => /pdf/i.test(a.contentType) || /\.pdf$/i.test(a.filename ?? ""))) {
+    const text = utils.readPdfText(attachment.content);
+    const order = text.match(/ordine (\w+)/)?.[1];
+    const operation = text.match(/Tipo di Operazione:\s*(\w+)/)?.[1];
+    const isin = text.match(/ISIN (\w{12})/)?.[1];
+    const fills = [...text.matchAll(/(\d\d)\.(\d\d)\.(\d{4})\s+\S+\s+Eseguito(?: \([^)]*\))?\s+([\d.,]+)\s+([\d.,]+)/g)];
+    const value = italian(text.match(/Controvalore:\s+(-?[\d.,]+)/)?.[1]);
+    if (!order || !operation || !isin || fills.length === 0 || !value) continue;
+    const securityId = DIRECTA_ISINS[isin];
+    if (!securityId) {
+      console.warn(`[SCRAPE EMAILS] directa: unknown ISIN ${isin} (order ${order}), add it to DIRECTA_ISINS.`);
+      continue;
+    }
+    const [, day, month, year] = fills[0];
+    const quantity = fills.reduce((sum, fill) => sum + italian(fill[4]), 0);
+    events.push({
+      date: `${year}-${month}-${day}`,
+      event_type: operation === "Acquisto" ? "PURCHASE" : "SALE",
+      portfolio_id: portfolioId,
+      security_id: securityId,
+      quantity,
+      price: value / quantity,
+      fees_override: italian(text.match(/Commissioni:\s+(-?[\d.,]+)/)?.[1]),
+      event_metadata: { order_id: order, tax_withheld: italian(text.match(/Ritenuta:\s*\*?\s+(-?[\d.,]+)/)?.[1]) },
+    });
+  }
+  return events;
 }

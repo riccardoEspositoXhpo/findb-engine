@@ -285,7 +285,8 @@ async function processPurchase(event) {
 }
 
 /**
- * SALE -> SELL transaction (+ cash to the source portfolio). The security must be held on the latest positions.
+ * SALE -> SELL transaction (+ cash to the source portfolio, + the capital gain tax the broker withheld,
+ * event_metadata.tax_withheld, as a CAPITAL_GAIN_TAX flow). The security must be held on that day.
  * GAS dated the transaction on DATE even when PROCESS_DATE was set; here everything uses the effective date.
  * Migrated from processSaleEvent in // eventsProcessing.gs
  */
@@ -317,6 +318,18 @@ async function processSale(event) {
     event_id: event.event_id,
   });
   await moveCashBetweenAccounts(event, transaction);
+
+  const taxWithheld = Number(event.event_metadata?.tax_withheld ?? 0);
+  if (taxWithheld > 0) {
+    await ledger.addCapitalFlow({
+      date: dateStr,
+      portfolio_id: event.portfolio_id,
+      capital_flow_type: "CAPITAL_GAIN_TAX",
+      security_id: await ledger.cashSecurityFor(security.currency),
+      quantity: taxWithheld,
+      event_id: event.event_id,
+    });
+  }
   return true;
 }
 

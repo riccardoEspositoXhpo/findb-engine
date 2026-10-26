@@ -135,3 +135,12 @@ The Allianz site has a full contributions export (`export.xls`, BIFF8 "Java Exce
 `jobs/dailyBatch.js`: marketData -> scrapeEmails -> events -> **valuation.run** -> QC -> email. Full DRY_RUN batch: 20.9s, 18 portfolios valued, 0 failed (UNREALIZED_TAX skipped: not migrated). Weekly / monthly portfolios catch up past changes on their next scheduled day.
 - Bug fixed in `getRollStartDate`: last_run (max nav.created_at) was read into JS and passed back — JS Dates keep milliseconds, Postgres microseconds, so rows written in the same transaction as the last nav looked newer (ALLIANZ re-rolled from 2023 every run). last_run now stays inside the SQL.
 - `utils.daysBetween` (moved from events.js).
+
+### [DIRECTA-EMAILS] DIRECTA rebuilt from the Directa emails (2026-10-26)
+Label `directa`, parsed by `scrapeEmails.parseDirecta` into events (the normal daily path):
+- "Conferma di accredito bonifico" -> INFLOW ("Importo" English number format, date = "Valuta").
+- "Nota informativa <order>" -> the PDF note: PURCHASE / SALE (Vendita, Liquidazione = redemption) on the execution date, quantity summed over fills, price = Controvalore / qty, fees_override = Commissioni, event_metadata { order_id, tax_withheld = Ritenuta }. `processSale` now writes tax_withheld as CAPITAL_GAIN_TAX. ISIN -> security_id map inside the parser.
+- "Fwd: ..." (copies the user forwarded) ignored. Directa sent the same note once per partial fill: `dropRepeatedOrders` keeps one event per order_id (this run + events already saved).
+- `utils.readPdfText`: no-dependency PDF text reader (inflate streams, Tj/TJ strings inside BT..ET blocks only — the page stream carries a 26 MB inline image).
+- Reconciliation vs the GAS ledger: 87/91 orders identical; the emails fixed the 2026-05-25 monthly buy GAS never booked (VWCE 13, EXXY 6, XDEM 2), XDEM 2026-04-23 (2 units, not 3), two transfers (3050 on 2025-03-29, 2900 on 2025-07-08), the fees of the 2024 certificates and the 14.80 withholding on the 2026-10-20 sale.
+- `claude/tools/migrateDirecta.mjs` (user OK): deleted the DIRECTA transactions (except 2025-07-23 XDEM, note not in the label), CASHIN and duplicate TRANSACTION_FEE flows, GAS PURCHASE / SALE / INFLOW events; scraped, processed (112 events, 0 failed), rolled from inception. Kept: coupons + tax, CASHOUTs, ADJUST_OUT 2024-06-22.
