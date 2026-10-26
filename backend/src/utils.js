@@ -7,11 +7,40 @@ export const utils = {
   dbToMap,
   mapToDb,
   formatDateToISO,
-  toRomeDateISO,
+  addDays,
+  daysBetween,
   fetchWithRetry,
   convertItalianFloat,
   doesItRunToday,
+  readXls,
 };
+
+/**
+ * ISO date + n calendar days (n can be negative). TZ is UTC (config.js), so no DST surprises.
+ *
+ * @param {Date|string} date
+ * @param {number} days
+ * @returns {string} ISO date
+ */
+function addDays(date, days) {
+  const result = new Date(`${formatDateToISO(date)}T00:00:00Z`);
+  result.setUTCDate(result.getUTCDate() + days);
+  return result.toISOString().slice(0, 10);
+}
+
+/**
+ * Every ISO day from firstDay to lastDay, both included (empty if firstDay > lastDay).
+ *
+ * @param {Date|string} firstDay
+ * @param {Date|string} lastDay
+ * @returns {string[]} ISO dates
+ */
+function daysBetween(firstDay, lastDay) {
+  const days = [];
+  const last = formatDateToISO(lastDay);
+  for (let day = formatDateToISO(firstDay); day <= last; day = addDays(day, 1)) days.push(day);
+  return days;
+}
 
 /**
  * Evaluates whether a security or portfolio should be valued on targetDate.
@@ -182,7 +211,10 @@ async function getTableReplaceBlock(dbClient, tableName) {
   let replaceBlock = null;
   try {
     const parsed = JSON.parse(res.rows[0]?.comment ?? "null");
-    if (Array.isArray(parsed?.replace_block) && parsed.replace_block.length > 0) {
+    if (
+      Array.isArray(parsed?.replace_block) &&
+      parsed.replace_block.length > 0
+    ) {
       replaceBlock = parsed.replace_block;
     }
   } catch {
@@ -234,17 +266,6 @@ function mapToDb(mapOrObject) {
     return Object.values(mapOrObject);
   }
   return [];
-}
-
-/**
- * Calendar date (YYYY-MM-DD) of a timestamp in Europe/Rome: something at 00:30 Rome belongs to that Rome day, not
- * to the previous UTC one (the process runs in UTC). For external timestamps: emails, broker ledgers.
- *
- * @param {Date|number|string} timestamp
- * @returns {string} ISO date
- */
-function toRomeDateISO(timestamp) {
-  return new Intl.DateTimeFormat("sv-SE", { timeZone: "Europe/Rome" }).format(new Date(timestamp));
 }
 
 // utilities.gs
@@ -363,4 +384,107 @@ async function fetchWithRetry(
       await new Promise((resolve) => setTimeout(resolve, backoff));
     }
   }
+}
+
+/**
+ * Minimal reader for old Excel files (.xls, BIFF8 inside an OLE container), no dependency: enough for the broker exports
+ * we parse (Allianz). Reads text (shared strings, labels) and numbers (NUMBER, RK, MULRK) cells; dates stay Excel
+ * serial numbers (excelSerialToISO). No formulas, formats or merged cells.
+ *
+ * @param {Buffer} buffer - The .xls file
+ * @returns {Object<string, Array<Array<string|number>>>} sheet name -> rows of cells ("" when empty)
+ */
+function readXls(buffer) {
+  // OLE compound file: FAT chains of sectors; the "Workbook" stream holds the BIFF records
+  const sectorSize = 1 << buffer.readUInt16LE(30);
+  const fatSectors = [];
+  for (let i = 0; i < buffer.readUInt32LE(44) && i < 109; i++) fatSectors.push(buffer.readUInt32LE(76 + i * 4));
+  const sector = (i) => buffer.subarray(512 + i * sectorSize, 512 + (i + 1) * sectorSize);
+  const fat = [];
+  for (const s of fatSectors) for (let o = 0; o < sectorSize; o += 4) fat.push(sector(s).readUInt32LE(o));
+  const chain = (start) => {
+    const parts = [];
+    for (let i = start; i < 0xfffffffa; i = fat[i]) parts.push(sector(i));
+    return Buffer.concat(parts);
+  };
+  const directory = chain(buffer.readUInt32LE(48));
+  let workbook = null;
+  for (let o = 0; o < directory.length; o += 128) {
+    const nameLength = directory.readUInt16LE(o + 64);
+    const name = directory.subarray(o, o + Math.max(nameLength - 2, 0)).toString("utf16le");
+    if (name === "Workbook" || name === "Book") workbook = chain(directory.readUInt32LE(o + 116)).subarray(0, directory.readUInt32LE(o + 120));
+  }
+  if (!workbook) throw new Error("readXls: no Workbook stream (not a BIFF8 .xls?)");
+
+  const records = [];
+  for (let p = 0; p + 4 <= workbook.length; ) {
+    const length = workbook.readUInt16LE(p + 2);
+    records.push([workbook.readUInt16LE(p), workbook.subarray(p + 4, p + 4 + length)]);
+    p += 4 + length;
+  }
+  const readString = (buf, pos, chars, flags) =>
+    flags & 1 ? [buf.toString("utf16le", pos, pos + 2 * chars), pos + 2 * chars] : [buf.toString("latin1", pos, pos + chars), pos + chars];
+  const rk = (value) => {
+    const n = value & 2 ? value >> 2 : new DataView(new Uint32Array([0, value & 0xfffffffc]).buffer).getFloat64(0, true);
+    return value & 1 ? n / 100 : n;
+  };
+
+  const sheetNames = [];
+  const sst = [];
+  const cells = [];
+  let current = -1;
+  for (let i = 0; i < records.length; i++) {
+    const [type, b] = records[i];
+    if (type === 0x85) sheetNames.push(readString(b, 8, b[6], b[7])[0]);
+    else if (type === 0xfc) {
+      // Shared strings, possibly split over CONTINUE records (each continuation restarts with a flags byte)
+      const parts = [b];
+      while (i + 1 < records.length && records[i + 1][0] === 0x3c) parts.push(records[++i][1]);
+      let part = 0;
+      let buf = parts[0];
+      let pos = 8;
+      for (let k = 0, total = b.readUInt32LE(4); k < total; k++) {
+        if (pos >= buf.length) { buf = parts[++part]; pos = 0; }
+        let chars = buf.readUInt16LE(pos);
+        let flags = buf[pos + 2];
+        pos += 3;
+        const richRuns = flags & 8 ? buf.readUInt16LE(pos) : 0;
+        if (flags & 8) pos += 2;
+        const extSize = flags & 4 ? buf.readUInt32LE(pos) : 0;
+        if (flags & 4) pos += 4;
+        let text = "";
+        while (chars > 0) {
+          const take = Math.min(chars, Math.floor((buf.length - pos) / (flags & 1 ? 2 : 1)));
+          const [chunk, next] = readString(buf, pos, take, flags);
+          text += chunk;
+          pos = next;
+          chars -= take;
+          if (chars > 0) { buf = parts[++part]; flags = buf[0]; pos = 1; }
+        }
+        pos += richRuns * 4 + extSize;
+        sst.push(text);
+      }
+    } else if (type === 0x809 && b.readUInt16LE(2) === 0x10) cells[++current] = new Map();
+    else if (current >= 0) {
+      const set = (row, col, value) => cells[current].set(`${row},${col}`, value);
+      if (type === 0xfd) set(b.readUInt16LE(0), b.readUInt16LE(2), sst[b.readUInt32LE(6)]);
+      else if (type === 0x203) set(b.readUInt16LE(0), b.readUInt16LE(2), b.readDoubleLE(6));
+      else if (type === 0x27e) set(b.readUInt16LE(0), b.readUInt16LE(2), rk(b.readUInt32LE(6)));
+      else if (type === 0xbd) {
+        const row = b.readUInt16LE(0);
+        const firstCol = b.readUInt16LE(2);
+        for (let j = 0; j < Math.floor((b.length - 6) / 6); j++) set(row, firstCol + j, rk(b.readUInt32LE(4 + j * 6 + 2)));
+      } else if (type === 0x204) set(b.readUInt16LE(0), b.readUInt16LE(2), readString(b, 9, b.readUInt16LE(6), b[8])[0]);
+    }
+  }
+
+  const workbookSheets = {};
+  sheetNames.forEach((name, index) => {
+    const sheet = cells[index] ?? new Map();
+    const keys = [...sheet.keys()].map((key) => key.split(",").map(Number));
+    const rows = keys.length ? Math.max(...keys.map(([r]) => r)) + 1 : 0;
+    const cols = keys.length ? Math.max(...keys.map(([, c]) => c)) + 1 : 0;
+    workbookSheets[name] = Array.from({ length: rows }, (_, r) => Array.from({ length: cols }, (_, c) => sheet.get(`${r},${c}`) ?? ""));
+  });
+  return workbookSheets;
 }

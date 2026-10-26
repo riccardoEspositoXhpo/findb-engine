@@ -226,6 +226,9 @@ CREATE TABLE IF NOT EXISTS prices (
     date DATE NOT NULL,
     security_id TEXT NOT NULL REFERENCES security_master(security_id) ON DELETE CASCADE,
     price NUMERIC(18, 4) NOT NULL,
+    -- when the row was written (replace = delete + insert, so a rewrite refreshes it): ROLL re-rolls the portfolios
+    -- holding a security from the date of a price written after their last run
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT pk_prices PRIMARY KEY (date, security_id),
     CONSTRAINT chk_prices_price_non_negative CHECK (price >= 0)
 );
@@ -258,6 +261,8 @@ CREATE TABLE IF NOT EXISTS nav (
     portfolio_id TEXT NOT NULL REFERENCES portfolios(portfolio_id) ON DELETE CASCADE,
     nav NUMERIC NOT NULL,
     nav_eur NUMERIC NOT NULL,
+    -- when the row was written: max(created_at) of a portfolio = its last ROLL run (see valuation.getRollStartDate)
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT pk_nav PRIMARY KEY (date, portfolio_id)
 );
 

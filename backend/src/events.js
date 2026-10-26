@@ -2,7 +2,6 @@ import { utils } from "./utils.js";
 import { query, replaceDataInDb, withSavepoint } from "./db.js";
 import { loadFxRates, currencyConverter } from "./marketData.js";
 import { ledger } from "./ledger.js";
-import { getLatestPositionsForDate } from "./valuation.js";
 
 export const events = {
   run,
@@ -38,7 +37,8 @@ export async function run(targetDate = new Date()) {
 
 // One handler per event_type: (event) -> true when the event was turned into ledger rows.
 // Not migrated yet -> false, the event stays unprocessed and is retried every night.
-// Migrated from eventHandler in // eventsProcessing.gs (PORTFOLIO_INCOME dropped: unused)
+// Migrated from eventHandler in // eventsProcessing.gs (PORTFOLIO_INCOME dropped: unused; PENSION_CONTRIBUTION dropped:
+// ALLIANZ is imported from the Allianz export, valuation.runAllianz)
 const EVENT_HANDLERS = {
   INFLOW: processFlow,
   OUTFLOW: processFlow,
@@ -51,34 +51,18 @@ const EVENT_HANDLERS = {
   BALANCE: forceCashBalance,
   MATURED_SECURITY: replaceMaturedSecurity,
   RECURRING_PAYMENT: processRecurringPayment,
-  PENSION_CONTRIBUTION: notMigratedYet,
 };
-
-// Fees for bonds bought on Borsa Italiana when no fees_override is given (% of market value, minimum)
-// Migrated from XMLPATHS[location].fees in // local.gs
-const FEE_RULES = {
-  BOT: { pct: 0.065, min: 0 },
-  BTP: { pct: 0.035, min: 3 },
-};
-
-// Capital gain tax withheld at purchase (%), on the expected profit to maturity. GAS: XMLPATHS.BOT.taxAtSource
-const TAX_AT_SOURCE = { BOT: 12.5 };
-
-async function notMigratedYet(event) {
-  console.warn(`[EVENTS] ${event.event_type} handler not migrated yet, event ${event.event_id} left pending.`);
-  return false;
-}
 
 /** The date the event takes effect: process_date if set, else date (GAS: PROCESS_DATE !== "" ? PROCESS_DATE : DATE). */
 function effectiveDate(event) {
   return utils.formatDateToISO(event.process_date ?? event.date);
 }
 
-/** Quantity of a security on the portfolio's latest positions on or before the date (0 if not held). */
+/** Quantity of a security held on the date, from the ledger (0 if not held): exact whatever valuation ran. */
 async function getHeldQuantity(portfolioId, securityId, dateStr) {
-  const positions = await getLatestPositionsForDate(portfolioId, dateStr);
-  const position = positions.find((row) => row.security_id === securityId);
-  return position ? Number(position.quantity) : 0;
+  return (
+    (await ledger.getLedgerHoldings(portfolioId, dateStr)).get(securityId) ?? 0
+  );
 }
 
 /**
@@ -88,7 +72,8 @@ async function getHeldQuantity(portfolioId, securityId, dateStr) {
  */
 async function processFlow(event) {
   const portfolio = await ledger.getPortfolio(event.portfolio_id);
-  const securityId = event.security_id ?? (await ledger.cashSecurityFor(portfolio.currency));
+  const securityId =
+    event.security_id ?? (await ledger.cashSecurityFor(portfolio.currency));
 
   let flowType = event.event_type;
   if (flowType === "INFLOW" || flowType === "OUTFLOW") {
@@ -115,13 +100,28 @@ async function processFlow(event) {
  * Migrated from processCashTransfer in // eventsProcessing.gs
  */
 async function processCashTransfer(event) {
-  if (!event.source_portfolio_id) throw new Error("CASH_TRANSFER needs a source_portfolio_id");
+  if (!event.source_portfolio_id)
+    throw new Error("CASH_TRANSFER needs a source_portfolio_id");
   const portfolio = await ledger.getPortfolio(event.portfolio_id);
-  const securityId = event.security_id ?? (await ledger.cashSecurityFor(portfolio.currency));
-  const common = { date: effectiveDate(event), security_id: securityId, quantity: Number(event.quantity), event_id: event.event_id };
+  const securityId =
+    event.security_id ?? (await ledger.cashSecurityFor(portfolio.currency));
+  const common = {
+    date: effectiveDate(event),
+    security_id: securityId,
+    quantity: Number(event.quantity),
+    event_id: event.event_id,
+  };
 
-  await ledger.addCapitalFlow({ ...common, portfolio_id: event.portfolio_id, capital_flow_type: "CASHIN" });
-  await ledger.addCapitalFlow({ ...common, portfolio_id: event.source_portfolio_id, capital_flow_type: "CASHOUT" });
+  await ledger.addCapitalFlow({
+    ...common,
+    portfolio_id: event.portfolio_id,
+    capital_flow_type: "CASHIN",
+  });
+  await ledger.addCapitalFlow({
+    ...common,
+    portfolio_id: event.source_portfolio_id,
+    capital_flow_type: "CASHOUT",
+  });
   return true;
 }
 
@@ -131,7 +131,8 @@ async function processCashTransfer(event) {
  * Migrated from processCouponTransfer in // eventsProcessing.gs
  */
 async function processCouponTransfer(event) {
-  if (!event.source_portfolio_id) throw new Error("COUPON_TRANSFER needs a source_portfolio_id");
+  if (!event.source_portfolio_id)
+    throw new Error("COUPON_TRANSFER needs a source_portfolio_id");
   const common = {
     date: effectiveDate(event),
     security_id: event.security_id ?? "CASH_EUR",
@@ -139,9 +140,21 @@ async function processCouponTransfer(event) {
     event_id: event.event_id,
   };
 
-  await ledger.addCapitalFlow({ ...common, portfolio_id: event.source_portfolio_id, capital_flow_type: "COUPON" });
-  await ledger.addCapitalFlow({ ...common, portfolio_id: event.source_portfolio_id, capital_flow_type: "CASHOUT" });
-  await ledger.addCapitalFlow({ ...common, portfolio_id: event.portfolio_id, capital_flow_type: "CASHIN" });
+  await ledger.addCapitalFlow({
+    ...common,
+    portfolio_id: event.source_portfolio_id,
+    capital_flow_type: "COUPON",
+  });
+  await ledger.addCapitalFlow({
+    ...common,
+    portfolio_id: event.source_portfolio_id,
+    capital_flow_type: "CASHOUT",
+  });
+  await ledger.addCapitalFlow({
+    ...common,
+    portfolio_id: event.portfolio_id,
+    capital_flow_type: "CASHIN",
+  });
   return true;
 }
 
@@ -152,10 +165,21 @@ async function processCouponTransfer(event) {
  * Migrated from processFees in // eventsProcessing.gs
  */
 async function computeFees(event, price) {
-  if (event.fees_override !== null && event.fees_override !== undefined) return Number(event.fees_override);
+  // Fees for bonds bought on Borsa Italiana when no fees_override is given (% of market value, minimum)
+  // Migrated from XMLPATHS[location].fees in // local.gs
+  const FEE_RULES = {
+    BOT: { pct: 0.065, min: 0 },
+    BTP: { pct: 0.035, min: 3 },
+  };
+  if (event.fees_override !== null && event.fees_override !== undefined)
+    return Number(event.fees_override);
   const rule = FEE_RULES[event.location];
   if (!rule) return 0;
-  const marketValue = await ledger.computeMarketValue(event.security_id, price, Number(event.quantity));
+  const marketValue = await ledger.computeMarketValue(
+    event.security_id,
+    price,
+    Number(event.quantity),
+  );
   return Math.max((marketValue * rule.pct) / 100, rule.min);
 }
 
@@ -166,15 +190,23 @@ async function computeFees(event, price) {
  * Migrated from transactionToFlowSeparateAccounts in // eventsProcessing.gs
  */
 async function moveCashBetweenAccounts(event, transaction) {
-  if (!event.source_portfolio_id || event.source_portfolio_id === event.portfolio_id) return;
+  if (
+    !event.source_portfolio_id ||
+    event.source_portfolio_id === event.portfolio_id
+  )
+    return;
 
   const isBuy = transaction.transaction_type === "BUY";
   const portfolio = await ledger.getPortfolio(event.portfolio_id);
   const source = await ledger.getPortfolio(event.source_portfolio_id);
   const dateStr = transaction.date;
 
-  const amountBase = transaction.market_value_base + (isBuy ? 1 : -1) * transaction.fee_value_base;
-  const amountSource = amountBase * currencyConverter(portfolio.currency, source.currency, dateStr);
+  const amountBase =
+    transaction.market_value_base +
+    (isBuy ? 1 : -1) * transaction.fee_value_base;
+  const amountSource =
+    amountBase *
+    currencyConverter(portfolio.currency, source.currency, dateStr);
 
   await ledger.addCapitalFlow({
     date: dateStr,
@@ -207,9 +239,13 @@ async function processPurchase(event) {
   const security = await ledger.getSecurity(event.security_id);
   const quantity = Number(event.quantity);
 
-  const price = event.price ?? (await ledger.getLatestPriceForDate(event.security_id, dateStr));
+  const price =
+    event.price ??
+    (await ledger.getLatestPriceForDate(event.security_id, dateStr));
   const fee = await computeFees(event, price);
-  const tradeCurrency = event.event_metadata?.purchaseInBaseCcy ? portfolio.currency : security.currency;
+  const tradeCurrency = event.event_metadata?.purchaseInBaseCcy
+    ? portfolio.currency
+    : security.currency;
 
   const transaction = await ledger.addTransaction({
     date: dateStr,
@@ -225,12 +261,17 @@ async function processPurchase(event) {
   });
   await moveCashBetweenAccounts(event, transaction);
 
+  // Capital gain tax withheld at purchase (%), on the expected profit to maturity. GAS: XMLPATHS.BOT.taxAtSource
+  const TAX_AT_SOURCE = { BOT: 12.5 };
   const taxRate = TAX_AT_SOURCE[event.location];
   if (taxRate) {
     // Expected profit to maturity: redemption (face x quantity) - (purchase value + fees). GAS multiplied by 12.5
     // instead of 12.5%.
-    const purchaseValue = (await ledger.computeMarketValue(event.security_id, price, quantity)) + fee;
-    const expectedProfit = Number(security.face ?? 1000) * quantity - purchaseValue;
+    const purchaseValue =
+      (await ledger.computeMarketValue(event.security_id, price, quantity)) +
+      fee;
+    const expectedProfit =
+      Number(security.face ?? 1000) * quantity - purchaseValue;
     await ledger.addCapitalFlow({
       date: dateStr,
       portfolio_id: event.portfolio_id,
@@ -251,11 +292,18 @@ async function processPurchase(event) {
 async function processSale(event) {
   const dateStr = effectiveDate(event);
   const security = await ledger.getSecurity(event.security_id);
-  if ((await getHeldQuantity(event.portfolio_id, event.security_id, dateStr)) === 0) {
-    throw new Error(`selling ${event.security_id}, not found in the latest positions of ${event.portfolio_id}`);
+  if (
+    (await getHeldQuantity(event.portfolio_id, event.security_id, dateStr)) ===
+    0
+  ) {
+    throw new Error(
+      `selling ${event.security_id}, not found in the latest positions of ${event.portfolio_id}`,
+    );
   }
 
-  const price = event.price ?? (await ledger.getLatestPriceForDate(event.security_id, dateStr));
+  const price =
+    event.price ??
+    (await ledger.getLatestPriceForDate(event.security_id, dateStr));
   const transaction = await ledger.addTransaction({
     date: dateStr,
     portfolio_id: event.portfolio_id,
@@ -274,7 +322,7 @@ async function processSale(event) {
 
 /**
  * BALANCE -> forces the portfolio's base-currency cash to event.quantity with an ADJUST_IN / ADJUST_OUT flow of the
- * difference from the latest positions. Needs positions (the portfolio must have been valued before).
+ * difference from the cash held on that day per the ledger (independent of whether valuation ran before events).
  * On FILE portfolios the event is the valuation (valuation.runFile reads it): no ledger rows.
  * Migrated from forceCashBalance in // eventsProcessing.gs
  */
@@ -287,11 +335,11 @@ async function forceCashBalance(event) {
   if (portfolio.valuation_method === "FILE") return true;
   const cashSecurityId = await ledger.cashSecurityFor(portfolio.currency);
 
-  const positions = await getLatestPositionsForDate(event.portfolio_id, dateStr);
-  if (positions.length === 0) throw new Error(`no positions for ${event.portfolio_id} on or before ${dateStr}`);
-  const cashPosition = positions.find((row) => row.security_id === cashSecurityId);
-
-  const adjustment = Number(event.quantity) - (cashPosition ? Number(cashPosition.quantity) : 0);
+  const cashHeld =
+    (await ledger.getLedgerHoldings(event.portfolio_id, dateStr)).get(
+      cashSecurityId,
+    ) ?? 0;
+  const adjustment = Number((Number(event.quantity) - cashHeld).toFixed(8));
   if (adjustment === 0) return true;
 
   await ledger.addCapitalFlow({
@@ -314,8 +362,15 @@ async function forceCashBalance(event) {
 async function replaceMaturedSecurity(event) {
   const dateStr = effectiveDate(event);
   const security = await ledger.getSecurity(event.security_id);
-  const heldQuantity = await getHeldQuantity(event.portfolio_id, event.security_id, dateStr);
-  if (heldQuantity === 0) throw new Error(`${event.security_id} not held in ${event.portfolio_id} on ${dateStr}`);
+  const heldQuantity = await getHeldQuantity(
+    event.portfolio_id,
+    event.security_id,
+    dateStr,
+  );
+  if (heldQuantity === 0)
+    throw new Error(
+      `${event.security_id} not held in ${event.portfolio_id} on ${dateStr}`,
+    );
 
   const transaction = await ledger.addTransaction({
     date: dateStr,
@@ -330,15 +385,26 @@ async function replaceMaturedSecurity(event) {
     event_id: event.event_id,
   });
 
-  if (event.source_portfolio_id && event.source_portfolio_id !== event.portfolio_id) {
+  if (
+    event.source_portfolio_id &&
+    event.source_portfolio_id !== event.portfolio_id
+  ) {
     const common = {
       date: dateStr,
       security_id: await ledger.cashSecurityFor(security.currency),
       quantity: transaction.market_value_local,
       event_id: event.event_id,
     };
-    await ledger.addCapitalFlow({ ...common, portfolio_id: event.portfolio_id, capital_flow_type: "CASHOUT" });
-    await ledger.addCapitalFlow({ ...common, portfolio_id: event.source_portfolio_id, capital_flow_type: "CASHIN" });
+    await ledger.addCapitalFlow({
+      ...common,
+      portfolio_id: event.portfolio_id,
+      capital_flow_type: "CASHOUT",
+    });
+    await ledger.addCapitalFlow({
+      ...common,
+      portfolio_id: event.source_portfolio_id,
+      capital_flow_type: "CASHIN",
+    });
   }
   return true;
 }
@@ -370,9 +436,18 @@ async function processRecurringPayment(event) {
   });
 
   if (!event.source_portfolio_id) return true;
-  const linkedCash = { date: dateStr, portfolio_id: event.source_portfolio_id, security_id: await ledger.cashSecurityFor(security.currency), event_id: event.event_id };
+  const linkedCash = {
+    date: dateStr,
+    portfolio_id: event.source_portfolio_id,
+    security_id: await ledger.cashSecurityFor(security.currency),
+    event_id: event.event_id,
+  };
   if (!isLoan) {
-    await ledger.addCapitalFlow({ ...linkedCash, capital_flow_type: "CASHIN", quantity: payment });
+    await ledger.addCapitalFlow({
+      ...linkedCash,
+      capital_flow_type: "CASHIN",
+      quantity: payment,
+    });
     return true;
   }
   const legs = [
@@ -381,7 +456,12 @@ async function processRecurringPayment(event) {
     ["TAX", Number(metadata.tax ?? 0)],
   ];
   for (const [flowType, amount] of legs) {
-    if (amount > 0) await ledger.addCapitalFlow({ ...linkedCash, capital_flow_type: flowType, quantity: amount });
+    if (amount > 0)
+      await ledger.addCapitalFlow({
+        ...linkedCash,
+        capital_flow_type: flowType,
+        quantity: amount,
+      });
   }
   return true;
 }
@@ -408,7 +488,9 @@ export async function processEvents(dateStr) {
   for (const event of pendingEvents) {
     const handler = EVENT_HANDLERS[event.event_type];
     if (!handler) {
-      console.warn(`[EVENTS] Unknown event type ${event.event_type} (event ${event.event_id}), left pending.`);
+      console.warn(
+        `[EVENTS] Unknown event type ${event.event_type} (event ${event.event_id}), left pending.`,
+      );
       summary.pending++;
       continue;
     }
@@ -417,13 +499,19 @@ export async function processEvents(dateStr) {
       // All-or-nothing per event: a handler failing halfway leaves no ledger rows behind
       const processed = await withSavepoint(async () => {
         if (!(await handler(event))) return false;
-        await query(`UPDATE events SET processed_at = NOW() WHERE event_id = $1;`, [event.event_id]);
+        await query(
+          `UPDATE events SET processed_at = NOW() WHERE event_id = $1;`,
+          [event.event_id],
+        );
         return true;
       });
       if (processed) summary.processed++;
       else summary.pending++;
     } catch (error) {
-      console.error(`[EVENTS] Event ${event.event_id} (${event.event_type} ${event.portfolio_id}) failed:`, error.message);
+      console.error(
+        `[EVENTS] Event ${event.event_id} (${event.event_type} ${event.portfolio_id}) failed:`,
+        error.message,
+      );
       summary.failed++;
     }
   }
@@ -440,13 +528,18 @@ export async function processEvents(dateStr) {
  * @returns {Promise<number>} events created
  */
 export async function generateScheduledEvents(dateStr) {
-  const { rows: schedules } = await query(`SELECT * FROM scheduled_events WHERE start_date <= $1;`, [dateStr]);
+  const { rows: schedules } = await query(
+    `SELECT * FROM scheduled_events WHERE start_date <= $1;`,
+    [dateStr],
+  );
 
   const candidates = [];
   for (const schedule of schedules) {
     const firstDay = utils.formatDateToISO(schedule.start_date);
-    const end = schedule.end_date ? utils.formatDateToISO(schedule.end_date) : null;
-    for (const day of daysBetween(firstDay, dateStr)) {
+    const end = schedule.end_date
+      ? utils.formatDateToISO(schedule.end_date)
+      : null;
+    for (const day of utils.daysBetween(firstDay, dateStr)) {
       if ((end && day >= end) || !utils.doesItRunToday(schedule, day)) continue;
       candidates.push({
         date: day,
@@ -457,12 +550,17 @@ export async function generateScheduledEvents(dateStr) {
         quantity: schedule.quantity,
         price: schedule.price,
         event_notes: schedule.event_notes,
-        event_metadata: { ...schedule.event_metadata, scheduled_event_id: Number(schedule.scheduled_event_id) },
+        event_metadata: {
+          ...schedule.event_metadata,
+          scheduled_event_id: Number(schedule.scheduled_event_id),
+        },
       });
     }
   }
 
-  return insertNewEvents(candidates, "scheduled_event_id", (id) => String(Number(id)));
+  return insertNewEvents(candidates, "scheduled_event_id", (id) =>
+    String(Number(id)),
+  );
 }
 
 /**
@@ -495,7 +593,11 @@ export async function generateRecurringFlowEvents(dateStr) {
     price: null,
     event_notes: row.payment_desc,
     event_metadata: {
-      recurring_flow: { portfolio_id: row.portfolio_id, payment_desc: row.payment_desc, eval_date: row.eval_date_str },
+      recurring_flow: {
+        portfolio_id: row.portfolio_id,
+        payment_desc: row.payment_desc,
+        eval_date: row.eval_date_str,
+      },
       principal: row.principal,
       interest: row.interest,
       tax: row.tax,
@@ -505,17 +607,9 @@ export async function generateRecurringFlowEvents(dateStr) {
   return insertNewEvents(
     candidates,
     "recurring_flow",
-    (source) => `${source.portfolio_id}|${source.payment_desc}|${source.eval_date}`,
+    (source) =>
+      `${source.portfolio_id}|${source.payment_desc}|${source.eval_date}`,
   );
-}
-
-/** Every ISO day from firstDay to lastDay, both included. */
-function daysBetween(firstDay, lastDay) {
-  const days = [];
-  for (let day = new Date(`${firstDay}T00:00:00Z`); utils.formatDateToISO(day) <= lastDay; day.setUTCDate(day.getUTCDate() + 1)) {
-    days.push(utils.formatDateToISO(day));
-  }
-  return days;
 }
 
 /**
@@ -534,10 +628,15 @@ export async function insertNewEvents(candidates, sourceKey, sourceToKey) {
     `SELECT date::text AS date, event_metadata -> $1 AS source FROM events WHERE event_metadata ? $1;`,
     [sourceKey],
   );
-  const existingKeys = new Set(existing.map((row) => `${row.date}|${sourceToKey(row.source)}`));
+  const existingKeys = new Set(
+    existing.map((row) => `${row.date}|${sourceToKey(row.source)}`),
+  );
 
   const newEvents = candidates.filter(
-    (event) => !existingKeys.has(`${event.date}|${sourceToKey(event.event_metadata[sourceKey])}`),
+    (event) =>
+      !existingKeys.has(
+        `${event.date}|${sourceToKey(event.event_metadata[sourceKey])}`,
+      ),
   );
   if (newEvents.length === 0) return 0;
 
@@ -545,7 +644,9 @@ export async function insertNewEvents(candidates, sourceKey, sourceToKey) {
   await replaceDataInDb(newEvents, "events");
 
   for (const event of newEvents) {
-    console.log(`[EVENTS] + ${event.date} ${event.event_type} ${event.portfolio_id} ${event.quantity} (${sourceKey})`);
+    console.log(
+      `[EVENTS] + ${event.date} ${event.event_type} ${event.portfolio_id} ${event.quantity} (${sourceKey})`,
+    );
   }
   return newEvents.length;
 }

@@ -515,9 +515,10 @@ let fxGraph = null;
 // "FROM>TO" -> routes that resolved at least once (shortest first, then date-specific fallbacks)
 const fxRouteCache = new Map();
 
-// Synthetic bridge between the stablecoin quote and fiat, valid for any date (GAS: virtual USDCUSD = 1).
-// Stored USDC/USD rows exist only since 2026-10-11; history before that is quoted vs USDT/USDC with no fiat link.
-const FX_CONSTANT_PAIRS = { "USDC/USD": 1 };
+// Synthetic bridges between the stablecoin quotes and fiat, valid for any date (GAS: virtual USDCUSD = 1).
+// Stored USDC/USD rows exist only since 2026-10-11 and USDC/USDT only since 2021-09-01; crypto history before that is
+// quoted vs USDT with no fiat link, so USDT/USD = 1 too.
+const FX_CONSTANT_PAIRS = { "USDC/USD": 1, "USDT/USD": 1 };
 
 /**
  * Loads the whole fx_rates table into memory. Must run before currencyConverter.

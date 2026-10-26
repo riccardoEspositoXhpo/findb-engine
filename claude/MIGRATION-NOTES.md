@@ -83,3 +83,55 @@ fx_rates had no fiat rows 2024-04-10 → 2026-10-10. `claude/tools/backfillFxFro
 - Convention: `market_value_local` = value in the COUNTER currency (the other leg); `base = local × fx(counter → portfolio)`; price in the security currency (1 for CASH/DEBT/CRYPTO). Capital flows have no counter: local = security currency.
 - Fixes: GAS duplicates dropped (DIRECTA EXXY 2026-06-23 ×6, BANCA360/MORTGAGE 2026-06-25, ALLIANZ 2025-02-28 + 2026-04-28, FIDEURAM↔FIDEURAM_INVEST 2026-07-23); bases recomputed with engine fx (fixes IBKR inverse fx, IBKR_CH unconverted, zero bases); TRADE_REPUBLIC ETH 2026-05-23 local = 200 EUR (was the qty); 1 blank price implied; negative IBKR CASHIN → CASHOUT; zero-qty flows, *_BAK/*_BAD/TEST* and Kraken rows (re-synced from API) skipped; 72 flows + 3 tx keep GAS base (no engine fx: old crypto).
 - GAS prices kept as is (no implied-price rewrite: the gaps were intraday vs close fx).
+
+### [KRAKEN-LIVE] KRAKEN ledger + positions saved (2026-10-26)
+- `valuation.run(today, { runOnlyThisId: "KRAKEN" })` committed: 59 capital flows (3 USDC CASHIN, 3 ETH ASSETIN, 53 STAKING) + 2 BTC/USDC BUY, `source='KRAKEN'`, `external_id` = Kraken ledger id / trade refid. Re-run writes 0 new rows.
+- Reconciles with the live balance: ETH exact; BTC differs by the trade fees (0.0004325 BTC), which Kraken charged in BTC on the received leg → transaction `quantity` is gross, `fee` (in BTC) separate. ROLL must subtract fees paid in the security itself.
+- History: `claude/tools/backfillKrakenPositions.mjs` rebuilt positions + nav for 2026-06-24 → yesterday (124 days) from the `balance` field of each ledger entry (last balance per Kraken asset per Rome day; staking variants collapse). Exact holdings, not reconstructed from flows. `normalizeKrakenAsset` / `callKrakenPrivate` are exported for it.
+
+### [UTC-DATES] toRomeDateISO removed (2026-10-26)
+External timestamps (Kraken ledger, Crypto.com CSV, emails) are dated with `utils.formatDateToISO` = their UTC day (TZ is UTC, config.js). 52 Kraken rows saved with Rome dates were moved to their UTC day; Kraken positions rebuilt.
+
+### [CRYPTO-COM] CSV by email (2026-10-26)
+The Crypto.com App has no API. The CSV export is emailed to Gmail, label `cryptocom`; `valuation.runCryptoCom` reads every CSV attachment (`scrapeEmails.readLabelAttachments`), writes the new rows straight to the ledger (not events: too many rows) with `source='CRYPTO_COM'`, `external_id` = sha1 of the row, skipping days covered by the GAS history, then values every day from the first new row. Holdings = `ledger.getLedgerHoldings` (whole ledger), price 1. 688 days backfilled from inception. Kraken trades: price 1 per unit (was counter value / qty).
+
+### [ROLL] reconstructMarketValues ported (2026-10-26)
+`valuation.rollPortfolio`: previous day's positions + that day's flows (OUTFLOW_TYPES -, others +) and transactions (security ±qty, counter cash ∓ market_value_local, fee out of fee currency) repriced (prices preloaded, latest ≤ day), written at once. Differences from GAS: fee = `fee` in fee currency (GAS subtracted fee_value_base, portfolio ccy); negative quantity = warning (GAS stopped); missing price = 0 + warning. Positions + nav always written together, atomically (`writePositionsAndNav`, like GAS writing both sheets). `forceCashBalance` and the SALE / MATURED held quantity read the ledger (`getLedgerHoldings`), not positions.
+
+### [ROLL-START] start dates derived from created_at (2026-10-26)
+No runStartDate flags. `valuation.getRollStartDate`: day after the latest nav, or earlier if, since the portfolio's last run (max nav.created_at), something was written with a past date: its ledger rows, prices of securities it held from that date, fx involving their currencies. `created_at` added to `prices` and `nav` (folded into 001, applied by hand). `replaceDataInDb` upserts refresh `created_at` only when a value really changes (IS DISTINCT FROM), so re-saving identical prices doesn't trigger re-rolls. Deleted rows leave no trace (corrections = delete + re-insert, picked up by the insert).
+
+### [ROLL-QC] ledger vs GAS positions, fixes decided with the user (2026-10-26)
+Tools: `claude/tools/qcRollVsGas.mjs`, `qcRollJumps.mjs`; fixes in `fixLedgerFromQc.mjs` (idempotent, source MIGRATION / external_id `qc:*`).
+- GAS positions errors (engine kept): DIRECTA monthly buys skipped/doubled 2026, FIDEURAM_INVEST duplicated buys 07/2026, BBVA/TR interest ignored, IBKR_CH partial fills dropped + fee_value_base bug, CRYPTO_COM 2 months of cashback lost, GAS edits on 2026-10-19 (FIDEURAM_INVEST LU0210529656, TR ETH/SOL: still held).
+- Ledger fixes: IT0005580003 matured 2025-01-14 (SELL at par + CASHOUT 79k); DIRECTA CASHOUT 5306.75 (2024-11-23); CONTO_ARANCIO CASHOUT 7000 (2025-08-05), closed 2026-10-26 with a last CASHOUT; AWARDS_VESTED ADJUST_IN 160.984 USD; AWARDS_UNVESTED closed_date 2024-01-31 (last vesting); ASSETIN seeds at inception for positions GAS seeded without flows (ALLIANZ funds, CAR, AWARDS_VESTED BLK); DIRECTA fee counted twice (transaction + TRANSACTION_FEE flow) -> transaction fee 0; BINANCE_SPOT missing USDC->RWUSD subscription 2026-05-01 + closing dust written off; IBKR_CH closing CASHOUTs = cash actually left; TRADE_REPUBLIC SOL/ETH were saveback -> the 2 BUY rows deleted (user OK), REWARDS flows instead.
+- BANCA360 / MORTGAGE instalments = recurring_flows exactly (GAS: 2025 unsplit, 2026 interest/principal swapped, 09-10/2026 on DEBT_EUR, MORTGAGE dates drifting), linked to their RECURRING_PAYMENT events; GAS ADJUST_OUT 2362.36 (2026-05-22) -> 8.75 (the rest was two instalments counted twice); BALANCE event 2026-10-26 = 4824.98 (user) -> ADJUST_OUT 237.74 (quarterly taxes/fees).
+- BARCLAYS / CREDIT_SUISSE: no ledger, monthly balances -> GAS positions/nav loaded as they are, valuation_method BALANCE.
+
+### [FX-GAPS] stablecoin bridge + pre-series rates (2026-10-26)
+`FX_CONSTANT_PAIRS` adds `USDT/USD = 1` (no USDT↔fiat route before USDC/USDT starts 2021-09-01). Missing rates added: MBOX/USDT 2021-08-19→09-04 (Binance klines, same closes), LUNC/USDT 2022-05-28/29 (= last old-LUNA price, rename), launchpool tokens / ETHW / RWUSD back-filled with their first known rate. GAS returned 0 for these; the engine throws, so holes surface.
+
+### [BACKFILL] positions + nav for all portfolios (2026-10-26)
+`claude/tools/backfillPortfolios.mjs`: engine wherever it has source data (ROLL from inception; FILE from the first BALANCE event; RECURRING_FLOWS from the first eval_date), GAS snapshot as it is before that and for BALANCE / IBKR / UNREALIZED_TAX / BINANCE_FUTURES / INTESA_INVEST / VINOVEST. QC: `claude/tools/qcBackfill.mjs` (nav = sum positions, engine vs GAS nav).
+- Backfill results: engine nav = sum(positions) on every portfolio-day it computes. FILE portfolios differ from GAS only on statement timing. EXTRA_ILLIQUID engine from 2023-11-27 (GAS before held ~4.5-7k not in recurring_flows).
+
+### [RECURRING-FLOWS-START] outstanding before the first eval_date (2026-10-26)
+`runRecurringFlows`: between start_date and a payment's first eval_date the outstanding is its total_amount (loan received / receivable promised), not 0 (MORTGAGE was 0 from 2025-06-25 to 07-25, "Regalo Dad" 0 until its first payment). start_date aligned to when GAS shows them: Regalo Dad 2023-12-25, Vendita Moto 2024-12-09, Sioss Dad 2026-01-10.
+
+### [PRICES-PRECISION] prices restored from GAS (2026-10-26)
+The engine price history (manual upload, like the fx one) was GAS rounded to 2 decimals: 34,411 rows on 39 securities restored to 4 decimals (NUMERIC(18,4)) — AEGON funds (~0.80 GBP) were off up to 3.6%. First real run of the created_at trigger: only the 6 ROLL portfolios holding those securities re-rolled, each from its own date. Remaining AEGON differences vs GAS = GAS positions valued with a price several days old.
+
+### [PENSION-CONTRIBUTION] handler ported (2026-10-26)
+`events.processPensionContribution`: CASHIN + one BUY per Allianz fund of amount x weight at the unit price on process_date (typed event_metadata.prices win and are saved to prices, else the latest stored price — Yahoo). Weights inside the function (AZIONARIA 73.7%, MULTIASSET 12%, BILANCIATA 10%, OBBLT 4.3%; GAS SECRET_DATA): reproduces GAS units to the last digit. The 2026-08-25 contribution (1419.82) is an event without ledger rows in GAS: to fill (waiting for the Allianz export).
+
+### [ALLIANZ-EXPORT] ALLIANZ from ROLL to CUSTOM (2026-10-26)
+The Allianz site has a full contributions export (`export.xls`, BIFF8 "Java Excel API": Data Competenza, Data Valuta, Tipologia Aziendale/Individuale/Tfr, Importo, Linea, Numero Quote, Valore Quota, Commissioni). Emailed to Gmail (no subject/text; filter `from:me filename:export.xls` -> label `allianz`; non-Allianz files skipped by header).
+- `utils.readXls`: minimal BIFF8 reader, no dependency (SheetJS from its CDN was blocked; user chose our own reader).
+- `valuation.runAllianz` = import (`importAllianzExport`) + `runRoll` (created_at trigger). Per Data Valuta: one CASHIN of the day's total + one BUY per fund (units summed, price = Valore Quota), source ALLIANZ, external_id `<date>:cashin` / `<date>:<fund>`; unit prices saved to prices (win over Yahoo on those days).
+- The export has contributions only: the TFR invested in OBBST in 06-07/2023 (240.96 units) was later switched into the 4 funds, not in the export. `claude/tools/migrateAllianz.mjs` reconciled to the units on the Allianz site on 2026-10-21 with ADJUST flows on 2023-11-11 (AZ +34.499, BIL +29.133, MA +50.723, OBBLT +56.549, OBBST -240.96). Result: units = site exactly, nav 69,522.78 = site.
+- Old ALLIANZ ledger deleted (user OK: GAS rows, QC seeds, pension event rows), inception 2023-06-20. `events.processPensionContribution` removed (PENSION_CONTRIBUTION events stay as history; new ones would stay pending as an unknown type). The hand-typed events had typos (BILANCIATA 24.814 vs 23.814 on 2026-09-28) and missed 2026-08-25: the export fixes both.
+
+### [BATCH-VALUATION] valuation in dailyBatch (2026-10-26)
+`jobs/dailyBatch.js`: marketData -> scrapeEmails -> events -> **valuation.run** -> QC -> email. Full DRY_RUN batch: 20.9s, 18 portfolios valued, 0 failed (UNREALIZED_TAX skipped: not migrated). Weekly / monthly portfolios catch up past changes on their next scheduled day.
+- Bug fixed in `getRollStartDate`: last_run (max nav.created_at) was read into JS and passed back — JS Dates keep milliseconds, Postgres microseconds, so rows written in the same transaction as the last nav looked newer (ALLIANZ re-rolled from 2023 every run). last_run now stays inside the SQL.
+- `utils.daysBetween` (moved from events.js).

@@ -10,6 +10,7 @@ export const scrapeEmails = {
   parseIntesaBalance,
   parseFideuramBalance,
   parseAmexBalance,
+  readLabelAttachments,
 };
 
 // Gmail label (= IMAP mailbox) -> portfolio + parser. A parser turns one email into events (BALANCE for bank / card
@@ -115,7 +116,7 @@ async function readLabel(client, label, dateStr) {
     // One streamed FETCH for the whole label (one round trip per email would take minutes on a first full scrape)
     for await (const message of client.fetch(uids, { source: true }, { uid: true })) {
       const parsed = await simpleParser(message.source);
-      const emailDateStr = utils.toRomeDateISO(parsed.date);
+      const emailDateStr = utils.formatDateToISO(parsed.date);
       if (emailDateStr > dateStr) continue;
       emails.push({
         messageId: parsed.messageId ?? `${label}:${message.uid}`,
@@ -130,6 +131,45 @@ async function readLabel(client, label, dateStr) {
   } finally {
     lock.release();
   }
+}
+
+/**
+ * Attachments of every email in a Gmail label whose filename matches the pattern (read-only). For sources that are
+ * files rather than text (Crypto.com CSV exports): the caller parses them and dedupes the rows itself.
+ *
+ * @param {string} label - Gmail label (IMAP mailbox)
+ * @param {RegExp} filenamePattern - e.g. /\.csv$/i
+ * @returns {Promise<Array<{filename: string, date: Date, content: Buffer}>>} oldest email first
+ */
+export async function readLabelAttachments(label, filenamePattern) {
+  if (!config.targetEmailRecipient || !config.smtpPassword) throw new Error("TARGET_EMAIL_RECIPIENT / SMTP_PASS not set");
+  const client = new ImapFlow({
+    host: "imap.gmail.com",
+    port: 993,
+    secure: true,
+    auth: { user: config.targetEmailRecipient, pass: config.smtpPassword },
+    logger: false,
+  });
+  const attachments = [];
+  await client.connect();
+  try {
+    const lock = await client.getMailboxLock(label, { readOnly: true });
+    try {
+      for await (const message of client.fetch("1:*", { source: true })) {
+        const parsed = await simpleParser(message.source);
+        for (const attachment of parsed.attachments) {
+          if (filenamePattern.test(attachment.filename ?? "")) {
+            attachments.push({ filename: attachment.filename, date: parsed.date, content: attachment.content });
+          }
+        }
+      }
+    } finally {
+      lock.release();
+    }
+  } finally {
+    await client.logout().catch(() => {});
+  }
+  return attachments.sort((a, b) => a.date - b.date);
 }
 
 /** Minimal HTML -> plain text (tags out, common entities decoded, whitespace collapsed): enough for the parsers. */

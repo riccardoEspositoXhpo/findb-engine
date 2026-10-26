@@ -10,7 +10,22 @@ export const ledger = {
   getLatestPriceForDate,
   computeMarketValue,
   cashSecurityFor,
+  getLedgerHoldings,
 };
+
+// Capital flow types that take quantity out of the portfolio (GAS OUTFLOWS = CASHOUT, ASSETOUT, ADJUST_OUT + FEES);
+// every other type adds it
+export const OUTFLOW_TYPES = [
+  "CASHOUT",
+  "ASSETOUT",
+  "ADJUST_OUT",
+  "TAX",
+  "MANAGEMENT_FEE",
+  "TRANSACTION_FEE",
+  "FUNDING_FEE",
+  "CAPITAL_GAIN_TAX",
+  "INTEREST_PAID",
+];
 
 // Securities valued at 1 per unit (GAS CASH_AND_CRYPTO_SECURITIES + DEBT): no prices stored for them
 const UNIT_VALUED_ASSET_TYPES = ["CASH", "DEBT", "CRYPTO"];
@@ -55,7 +70,7 @@ export async function cashSecurityFor(currency) {
 
 /**
  * Latest price on or before the date; 1 for unit-valued securities (cash, debt, crypto).
- * Migrated from getLatestPriceForDate in // securityData.gs
+ *
  */
 export async function getLatestPriceForDate(securityId, dateStr) {
   const security = await getSecurity(securityId);
@@ -125,7 +140,8 @@ export async function addTransaction(options, { write = true } = {}) {
     )) * currencyConverter(security.currency, counterCurrency, dateStr);
   const marketValueBase =
     options.market_value_base ??
-    marketValueLocal * currencyConverter(counterCurrency, portfolio.currency, dateStr);
+    marketValueLocal *
+      currencyConverter(counterCurrency, portfolio.currency, dateStr);
 
   const row = {
     date: dateStr,
@@ -177,7 +193,8 @@ export async function addCapitalFlow(options, { write = true } = {}) {
     ));
   const marketValueBase =
     options.market_value_base ??
-    marketValueLocal * currencyConverter(security.currency, portfolio.currency, dateStr);
+    marketValueLocal *
+      currencyConverter(security.currency, portfolio.currency, dateStr);
 
   const row = {
     date: dateStr,
@@ -195,4 +212,51 @@ export async function addCapitalFlow(options, { write = true } = {}) {
   };
   if (write) await replaceDataInDb([row], "capital_flows");
   return row;
+}
+
+/**
+ * Quantity held per security on dateStr, from the whole ledger up to that day: flows in/out, BUY +qty / SELL -qty on
+ * the security, the counter leg -/+ market_value_local on the counter currency's cash security, fees out of the fee
+ * currency. Exact for portfolios whose ledger is complete (crypto apps): the quantity side of ROLL.
+ *
+ * @param {string} portfolioId
+ * @param {string} dateStr - ISO date
+ * @returns {Promise<Map<string, number>>} security_id -> quantity (zero balances dropped)
+ */
+export async function getLedgerHoldings(portfolioId, dateStr) {
+  const { rows: flows } = await query(
+    `SELECT security_id, capital_flow_type, quantity FROM capital_flows WHERE portfolio_id = $1 AND date <= $2;`,
+    [portfolioId, dateStr],
+  );
+  const { rows: transactions } = await query(
+    `SELECT security_id, transaction_type, quantity, counter_currency, market_value_local, fee_currency, fee
+     FROM transactions WHERE portfolio_id = $1 AND date <= $2;`,
+    [portfolioId, dateStr],
+  );
+
+  const holdings = new Map();
+  const add = (securityId, quantity) =>
+    holdings.set(
+      securityId,
+      (holdings.get(securityId) ?? 0) + Number(quantity),
+    );
+  for (const flow of flows)
+    add(
+      flow.security_id,
+      OUTFLOW_TYPES.includes(flow.capital_flow_type)
+        ? -flow.quantity
+        : flow.quantity,
+    );
+  for (const tx of transactions) {
+    const sign = tx.transaction_type === "BUY" ? 1 : -1;
+    add(tx.security_id, sign * tx.quantity);
+    add(
+      await cashSecurityFor(tx.counter_currency),
+      -sign * tx.market_value_local,
+    );
+    if (Number(tx.fee)) add(await cashSecurityFor(tx.fee_currency), -tx.fee);
+  }
+  for (const [securityId, quantity] of holdings)
+    if (Math.abs(quantity) < 1e-9) holdings.delete(securityId);
+  return holdings;
 }

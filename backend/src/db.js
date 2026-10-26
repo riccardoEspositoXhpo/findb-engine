@@ -237,6 +237,13 @@ export async function replaceDataInDb(data, tableName, client = null) {
       .map((col) => `${col} = EXCLUDED.${col}`)
       .join(", ");
     conflictAction = `DO UPDATE SET ${updateAssignments}`;
+    // created_at = when the row was last written (ROLL start-date trigger): refreshed only when a value really changes,
+    // so re-saving identical rows (e.g. tonight's prices again) doesn't look like a revision
+    if (tableColumns.includes("created_at") && !dataKeys.has("created_at")) {
+      const current = nonPkColumns.map((col) => `${tableName}.${col}`).join(", ");
+      const incoming = nonPkColumns.map((col) => `EXCLUDED.${col}`).join(", ");
+      conflictAction += `, created_at = NOW() WHERE (${current}) IS DISTINCT FROM (${incoming})`;
+    }
   } else {
     // Pure junction tables containing only PK columns
     conflictAction = "DO NOTHING";
