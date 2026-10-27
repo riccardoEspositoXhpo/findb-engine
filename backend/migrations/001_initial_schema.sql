@@ -99,8 +99,8 @@ CREATE TABLE IF NOT EXISTS portfolios (
     liquidation_time_urgent TEXT,
     currency TEXT NOT NULL REFERENCES currencies(currency_code) ON DELETE RESTRICT,
     ivafe_taxable BOOLEAN NOT NULL DEFAULT FALSE,
-    -- XHPO = mine, JOINT = co-owned 50/50 with my girlfriend (her own portfolios would get her code). No history:
-    -- aggregates count a JOINT portfolio at 50% for its whole life (decided 2026-10-27, amounts small)
+    -- XHPO = mine, JOINT = co-owned 50/50 with my girlfriend (her own portfolios would get her code). The day a
+    -- portfolio became joint is in code (aggregates.js JOINT_SINCE): 100% before, 50% after
     owner TEXT NOT NULL DEFAULT 'XHPO',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT chk_portfolios_type CHECK (
@@ -277,6 +277,8 @@ CREATE TABLE IF NOT EXISTS aggregate_nav (
     aggregate_id TEXT NOT NULL REFERENCES aggregates(aggregate_id) ON DELETE CASCADE,
     nav NUMERIC NOT NULL,
     nav_eur NUMERIC NOT NULL,
+    -- when the row was written: max(created_at) of an aggregate = its last run (aggregates.getStartDate trigger)
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT pk_aggregate_nav PRIMARY KEY (date, aggregate_id)
 );
 

@@ -13,6 +13,7 @@ import { marketData } from "../src/marketData.js";
 import { events } from "../src/events.js";
 import { scrapeEmails } from "../src/scrapeEmails.js";
 import { valuation } from "../src/valuation.js";
+import { aggregates } from "../src/aggregates.js";
 import { sendQcEmail } from "../src/qcNotification.js";
 
 async function executePipeline() {
@@ -31,7 +32,11 @@ async function executePipeline() {
   // changed since their last run (ledger, prices, fx: getRollStartDate). A failing portfolio is logged and skipped.
   await valuation.run(config.date);
 
-  // 5. Overnight Quality Control Engine
+  // 5. Aggregate NAVs (aggregate_tree over portfolio navs; restarts from the earliest past nav / fx written since
+  // its last run)
+  await aggregates.run(config.date);
+
+  // 6. Overnight Quality Control Engine
   // In dry-run mode, QC queries the same uncommitted transaction client and verifies actual data
   const qcResults = await overnightQC.runAll(config.date);
 
@@ -46,7 +51,7 @@ async function executePipeline() {
     `[QC ENGINE] ${passed}/${total} checks passed (${criticals} critical failures).`,
   );
 
-  // 6. Dispatch QC status digest (suppressed during CI dry-run)
+  // 7. Dispatch QC status digest (suppressed during CI dry-run)
   if (config.dryRun) {
     console.log(
       "[FinDB Daily Batch] DRY-RUN active: Skipping email transmission.",
