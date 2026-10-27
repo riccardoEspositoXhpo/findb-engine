@@ -11,19 +11,17 @@ export const aggregates = {
  * Daily aggregate NAVs: for every aggregate and every day from its start date (getStartDate) to dateStr, the sum of
  * its children (aggregate_tree, nested aggregates resolved recursively): each portfolio's latest nav on or before the
  * day (0 before inception / after closing) x the owner's share x fx into the aggregate currency.
- * Aggregates are the user's wealth: JOINT portfolios count at 50% (portfolios.owner), from the day they became joint
- * (JOINT_SINCE: the only case, kept in code rather than an ownership table). Weekly / monthly portfolios carry their
- * latest nav forward, like GAS.
+ * Aggregates are the user's wealth: JOINT portfolios count at 50% (portfolios.owner as it is when the day is computed:
+ * an ownership change applies from then on, the history already computed stays). Weekly / monthly portfolios carry
+ * their latest nav forward, like GAS.
  * Migrated from runAggregateNav + reviseAggregateData in // aggregateData.gs
  *
  * @param {Date|string} [targetDate=new Date()] - Last day computed
  * @returns {Promise<{written: number, from: string|null}>}
  */
 export async function run(targetDate = new Date()) {
-  // Share of a portfolio that is the user's, by portfolios.owner; a JOINT portfolio was the user's alone (100%)
-  // before the day it became joint
+  // Share of a portfolio that is the user's, by portfolios.owner
   const OWNER_SHARE = { XHPO: 1, JOINT: 0.5 };
-  const JOINT_SINCE = { TRADE_REPUBLIC: "2025-07-01" };
 
   const dateStr = utils.formatDateToISO(targetDate);
   console.log(`[AGGREGATES] Starting aggregate NAVs up to ${dateStr}...`);
@@ -73,7 +71,7 @@ export async function run(targetDate = new Date()) {
         if (date < inception || (closed && date > closed)) return null;
         const nav = latestNav(id, date);
         if (nav === null) return null;
-        const share = JOINT_SINCE[id] && date < JOINT_SINCE[id] ? 1 : OWNER_SHARE[portfolio.owner];
+        const share = OWNER_SHARE[portfolio.owner];
         if (share === undefined) throw new Error(`portfolio ${id}: owner "${portfolio.owner}" has no share in OWNER_SHARE`);
         return nav * share * currencyConverter(portfolio.currency, currency, date);
       }
