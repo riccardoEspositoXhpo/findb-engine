@@ -40,131 +40,138 @@ export function buildQcEmailHtml(qcResults, targetDate = new Date()) {
     (c) => !c.passed && c.severity === "WARNING",
   );
 
+  const overall =
+    criticalCount > 0
+      ? { label: "CRITICAL ALERT", color: NORD.auroraRed }
+      : warningCount > 0
+        ? { label: "WARNINGS", color: NORD.auroraOrange }
+        : { label: "ALL GREEN", color: NORD.auroraGreen };
+
+  // Email-client rules: Gmail drops <body> styles, so the dark background lives on a full-width outer table
+  // (bgcolor + style); the card is a fluid table capped at 640px. Phones: viewport meta + @media rules (supported by
+  // Gmail / Apple Mail) stack the header, hide secondary columns and let wide data tables scroll.
   return `
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <meta name="supported-color-schemes" content="dark">
   <title>FinDB Overnight QC Report - ${dateStr}</title>
-</head>
-<body style="margin: 0; padding: 24px; background-color: ${NORD.polarNight0}; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: ${NORD.snowStorm1};">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width: 800px; margin: 0 auto; background-color: ${NORD.polarNight1}; border-radius: 8px; border: 1px solid ${NORD.polarNight2}; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">
-    
-    <!-- HEADER -->
-    <tr>
-      <td style="padding: 24px 32px; background-color: ${NORD.polarNight1}; border-bottom: 2px solid ${NORD.frost2};">
-        <table width="100%" cellpadding="0" cellspacing="0">
-          <tr>
-            <td>
-              <h1 style="margin: 0; font-size: 20px; font-weight: 700; color: ${NORD.snowStorm2}; letter-spacing: 0.5px;">
-                FINDB OVERNIGHT QC REPORT
-              </h1>
-              <div style="font-size: 13px; color: ${NORD.frost2}; margin-top: 4px; font-weight: 500;">
-                Valuation Date: ${dateStr}
-              </div>
-            </td>
-            <td align="right">
-              <span style="display: inline-block; padding: 6px 12px; border-radius: 4px; font-size: 12px; font-weight: 700; background-color: ${criticalCount > 0 ? NORD.auroraRed : warningCount > 0 ? NORD.auroraOrange : NORD.auroraGreen}; color: ${NORD.snowStorm2}; text-transform: uppercase;">
-                ${criticalCount > 0 ? "CRITICAL ALERT" : warningCount > 0 ? "WARNINGS DETECTED" : "ALL SYSTEMS GREEN"}
-              </span>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-
-    <!-- METRIC KPI STRIP -->
-    <tr>
-      <td style="padding: 16px 32px; background-color: ${NORD.polarNight0}; border-bottom: 1px solid ${NORD.polarNight2};">
-        <table width="100%" cellpadding="0" cellspacing="0">
-          <tr>
-            <td width="33%" style="text-align: center; border-right: 1px solid ${NORD.polarNight2};">
-              <div style="font-size: 11px; text-transform: uppercase; color: ${NORD.snowStorm0}; font-weight: 600;">Passed</div>
-              <div style="font-size: 22px; font-weight: 700; color: ${NORD.auroraGreen}; margin-top: 2px;">${passedCount} / ${checks.length}</div>
-            </td>
-            <td width="33%" style="text-align: center; border-right: 1px solid ${NORD.polarNight2};">
-              <div style="font-size: 11px; text-transform: uppercase; color: ${NORD.snowStorm0}; font-weight: 600;">Critical Deficiencies</div>
-              <div style="font-size: 22px; font-weight: 700; color: ${criticalCount > 0 ? NORD.auroraRed : NORD.snowStorm0}; margin-top: 2px;">${criticalCount}</div>
-            </td>
-            <td width="33%" style="text-align: center;">
-              <div style="font-size: 11px; text-transform: uppercase; color: ${NORD.snowStorm0}; font-weight: 600;">Warnings / Anomalies</div>
-              <div style="font-size: 22px; font-weight: 700; color: ${warningCount > 0 ? NORD.auroraOrange : NORD.snowStorm0}; margin-top: 2px;">${warningCount}</div>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-
-    <!-- TIER 1: EXECUTIVE SUMMARY TABLE -->
-    <tr>
-      <td style="padding: 24px 32px;">
-        <h2 style="margin: 0 0 12px 0; font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: ${NORD.snowStorm2};">
-          Executive Verification Summary
-        </h2>
-        <table width="100%" cellpadding="8" cellspacing="0" style="border-collapse: collapse; font-size: 13px;">
-          <thead>
-            <tr style="border-bottom: 1px solid ${NORD.polarNight3}; text-align: left; color: ${NORD.snowStorm0};">
-              <th style="padding: 8px 12px; font-weight: 600;">Check</th>
-              <th style="padding: 8px 12px; font-weight: 600;">Type</th>
-              <th style="padding: 8px 12px; font-weight: 600;">Severity</th>
-              <th style="padding: 8px 12px; font-weight: 600; text-align: right;">Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${checks.map((c, idx) => renderSummaryRow(c, idx)).join("")}
-          </tbody>
-        </table>
-      </td>
-    </tr>
-
-    <!-- TIER 2: FAILURES & ANOMALIES BREAKDOWN -->
-    ${
-      criticalFailures.length > 0 || warningFailures.length > 0
-        ? `
-    <tr>
-      <td style="padding: 0 32px 32px 32px;">
-        <div style="border-top: 1px solid ${NORD.polarNight2}; padding-top: 24px;">
-          
-          ${
-            criticalFailures.length > 0
-              ? `
-          <h2 style="margin: 0 0 16px 0; font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: ${NORD.auroraRed};">
-            🚨 Critical Failures (Immediate Attention)
-          </h2>
-          ${criticalFailures.map((c) => renderDetailCard(c, NORD.auroraRed)).join("")}
-          `
-              : ""
-          }
-
-          ${
-            warningFailures.length > 0
-              ? `
-          <h2 style="margin: ${criticalFailures.length > 0 ? "24px" : "0"} 0 16px 0; font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: ${NORD.auroraOrange};">
-            ⚠️ Warnings & Anomalies (Review Required)
-          </h2>
-          ${warningFailures.map((c) => renderDetailCard(c, NORD.auroraOrange)).join("")}
-          `
-              : ""
-          }
-
-        </div>
-      </td>
-    </tr>
-    `
-        : ""
+  <style>
+    body { margin: 0 !important; padding: 0 !important; background-color: ${NORD.polarNight0}; }
+    @media only screen and (max-width: 600px) {
+      .outer-pad { padding: 12px 8px !important; }
+      .section { padding-left: 16px !important; padding-right: 16px !important; }
+      .stack { display: block !important; width: 100% !important; text-align: left !important; }
+      .stack-gap { padding-top: 10px !important; }
+      .hide-mobile { display: none !important; }
+      .show-mobile { display: block !important; max-height: none !important; overflow: visible !important; }
+      .kpi-label { font-size: 11px !important; }
+      .kpi-value { font-size: 22px !important; }
+      .title { font-size: 19px !important; }
     }
-
-    <!-- FOOTER -->
+  </style>
+</head>
+<body style="margin: 0; padding: 0; background-color: ${NORD.polarNight0};">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${NORD.polarNight0}" style="background-color: ${NORD.polarNight0}; width: 100%;">
     <tr>
-      <td style="padding: 16px 32px; background-color: ${NORD.polarNight0}; border-top: 1px solid ${NORD.polarNight2}; font-size: 11px; color: ${NORD.polarNight3}; text-align: center;">
-        Generated automatically by findb-engine on GCP Batch &bull; Environment: Node.js &bull; Database: Postgres
+      <td class="outer-pad" align="center" style="padding: 24px 12px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${NORD.polarNight1}" style="width: 100%; max-width: 640px; background-color: ${NORD.polarNight1}; border: 1px solid ${NORD.polarNight2}; border-radius: 8px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: ${NORD.snowStorm1};">
+
+          <!-- HEADER -->
+          <tr>
+            <td class="section" style="padding: 22px 28px; border-bottom: 2px solid ${NORD.frost2};">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td class="stack" valign="middle">
+                    <div class="title" style="font-size: 20px; font-weight: 700; color: ${NORD.snowStorm2}; letter-spacing: 0.4px;">FINDB OVERNIGHT QC</div>
+                    <div style="font-size: 14px; color: ${NORD.frost2}; margin-top: 4px; font-weight: 500;">Valuation date ${dateStr}</div>
+                  </td>
+                  <td class="stack stack-gap" valign="middle" align="right" style="text-align: right;">
+                    <span style="display: inline-block; padding: 7px 12px; border-radius: 4px; font-size: 13px; font-weight: 700; background-color: ${overall.color}; color: ${NORD.polarNight0}; letter-spacing: 0.4px;">${overall.label}</span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- KPI STRIP -->
+          <tr>
+            <td class="section" bgcolor="${NORD.polarNight0}" style="padding: 16px 28px; background-color: ${NORD.polarNight0}; border-bottom: 1px solid ${NORD.polarNight2};">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  ${renderKpi("Passed", `${passedCount}/${checks.length}`, NORD.auroraGreen, true)}
+                  ${renderKpi("Critical", criticalCount, criticalCount > 0 ? NORD.auroraRed : NORD.snowStorm0, true)}
+                  ${renderKpi("Warnings", warningCount, warningCount > 0 ? NORD.auroraOrange : NORD.snowStorm0, false)}
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- SUMMARY -->
+          <tr>
+            <td class="section" style="padding: 22px 28px;">
+              <div style="margin: 0 0 12px 0; font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: ${NORD.snowStorm2};">Checks</div>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse; font-size: 14px;">
+                <tr style="text-align: left; color: ${NORD.snowStorm0};">
+                  <th align="left" style="padding: 8px 10px; font-weight: 600; font-size: 12px; border-bottom: 1px solid ${NORD.polarNight3};">Check</th>
+                  <th class="hide-mobile" align="left" style="padding: 8px 10px; font-weight: 600; font-size: 12px; border-bottom: 1px solid ${NORD.polarNight3};">Type</th>
+                  <th class="hide-mobile" align="left" style="padding: 8px 10px; font-weight: 600; font-size: 12px; border-bottom: 1px solid ${NORD.polarNight3};">Severity</th>
+                  <th align="right" style="padding: 8px 10px; font-weight: 600; font-size: 12px; border-bottom: 1px solid ${NORD.polarNight3};">Status</th>
+                </tr>
+                ${checks.map((c, idx) => renderSummaryRow(c, idx)).join("")}
+              </table>
+            </td>
+          </tr>
+
+          ${
+            criticalFailures.length > 0 || warningFailures.length > 0
+              ? `
+          <!-- FAILURES -->
+          <tr>
+            <td class="section" style="padding: 4px 28px 28px 28px;">
+              ${
+                criticalFailures.length > 0
+                  ? `<div style="margin: 16px 0 12px 0; font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: ${NORD.auroraRed};">🚨 Critical failures</div>
+              ${criticalFailures.map((c) => renderDetailCard(c, NORD.auroraRed)).join("")}`
+                  : ""
+              }
+              ${
+                warningFailures.length > 0
+                  ? `<div style="margin: 16px 0 12px 0; font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: ${NORD.auroraOrange};">⚠️ Warnings</div>
+              ${warningFailures.map((c) => renderDetailCard(c, NORD.auroraOrange)).join("")}`
+                  : ""
+              }
+            </td>
+          </tr>`
+              : ""
+          }
+
+          <!-- FOOTER -->
+          <tr>
+            <td class="section" bgcolor="${NORD.polarNight0}" style="padding: 14px 28px; background-color: ${NORD.polarNight0}; border-top: 1px solid ${NORD.polarNight2}; border-radius: 0 0 8px 8px; font-size: 12px; color: ${NORD.polarNight3}; text-align: center;">
+              findb-engine &bull; daily batch &bull; Postgres
+            </td>
+          </tr>
+
+        </table>
       </td>
     </tr>
-
   </table>
 </body>
 </html>
   `.trim();
+}
+
+/** One KPI cell (label above, big value below), with a divider on its right unless it is the last. */
+function renderKpi(label, value, color, divider) {
+  return `
+                  <td width="33%" align="center" valign="top" style="text-align: center; padding: 2px 4px;${divider ? ` border-right: 1px solid ${NORD.polarNight2};` : ""}">
+                    <div class="kpi-label" style="font-size: 12px; text-transform: uppercase; color: ${NORD.snowStorm0}; font-weight: 600; letter-spacing: 0.4px;">${label}</div>
+                    <div class="kpi-value" style="font-size: 24px; font-weight: 700; color: ${color}; margin-top: 4px;">${value}</div>
+                  </td>`;
 }
 
 function renderSummaryRow(c, idx) {
@@ -173,42 +180,43 @@ function renderSummaryRow(c, idx) {
 
   let badge;
   if (c.passed) {
-    badge = `<span style="background-color: ${NORD.auroraGreen}; color: ${NORD.polarNight0}; padding: 3px 8px; border-radius: 4px; font-weight: 700; font-size: 11px;">PASS</span>`;
+    badge = `<span style="background-color: ${NORD.auroraGreen}; color: ${NORD.polarNight0}; padding: 4px 9px; border-radius: 4px; font-weight: 700; font-size: 12px; white-space: nowrap;">PASS</span>`;
   } else if (c.severity === "CRITICAL") {
-    badge = `<span style="background-color: ${NORD.auroraRed}; color: ${NORD.snowStorm2}; padding: 3px 8px; border-radius: 4px; font-weight: 700; font-size: 11px;">FAIL</span>`;
+    badge = `<span style="background-color: ${NORD.auroraRed}; color: ${NORD.snowStorm2}; padding: 4px 9px; border-radius: 4px; font-weight: 700; font-size: 12px; white-space: nowrap;">FAIL</span>`;
   } else {
-    badge = `<span style="background-color: ${NORD.auroraOrange}; color: ${NORD.snowStorm2}; padding: 3px 8px; border-radius: 4px; font-weight: 700; font-size: 11px;">WARN</span>`;
+    badge = `<span style="background-color: ${NORD.auroraOrange}; color: ${NORD.snowStorm2}; padding: 4px 9px; border-radius: 4px; font-weight: 700; font-size: 12px; white-space: nowrap;">WARN</span>`;
   }
 
   const failureTypeColor =
     c.failureType === "DETERMINISTIC" ? NORD.frost2 : NORD.auroraYellow;
 
+  const severityColor = c.severity === "CRITICAL" ? NORD.auroraRed : NORD.snowStorm0;
+  const cell = `padding: 11px 10px; border-bottom: 1px solid ${NORD.polarNight2}; ${bg}`;
   return `
-    <tr style="border-bottom: 1px solid ${NORD.polarNight2}; ${bg}">
-      <td style="padding: 10px 12px;">
-        <div style="font-weight: 600; color: ${NORD.snowStorm2};">${c.check}</div>
-        ${c.summary ? `<div style="font-size: 11px; color: ${NORD.snowStorm0}; margin-top: 2px;">${c.summary}</div>` : ""}
-      </td>
-      <td style="padding: 10px 12px; font-size: 11px; font-weight: 600; color: ${failureTypeColor};">
-        ${c.failureType || "DETERMINISTIC"}
-      </td>
-      <td style="padding: 10px 12px; font-size: 11px; font-weight: 600; color: ${c.severity === "CRITICAL" ? NORD.auroraRed : NORD.snowStorm0};">
-        ${c.severity || "WARNING"}
-      </td>
-      <td style="padding: 10px 12px; text-align: right;">
-        ${badge}
-      </td>
-    </tr>
+                <tr>
+                  <td valign="top" style="${cell}">
+                    <div style="font-weight: 600; color: ${NORD.snowStorm2}; font-size: 14px;">${c.check}</div>
+                    ${c.summary ? `<div style="font-size: 12px; color: ${NORD.snowStorm0}; margin-top: 3px;">${c.summary}</div>` : ""}
+                    <div class="show-mobile" style="display: none; max-height: 0; overflow: hidden; font-size: 11px; font-weight: 600; margin-top: 4px;">
+                      <span style="color: ${failureTypeColor};">${c.failureType || "DETERMINISTIC"}</span>
+                      <span style="color: ${NORD.polarNight3};"> &bull; </span>
+                      <span style="color: ${severityColor};">${c.severity || "WARNING"}</span>
+                    </div>
+                  </td>
+                  <td class="hide-mobile" valign="top" style="${cell} font-size: 12px; font-weight: 600; color: ${failureTypeColor};">${c.failureType || "DETERMINISTIC"}</td>
+                  <td class="hide-mobile" valign="top" style="${cell} font-size: 12px; font-weight: 600; color: ${severityColor};">${c.severity || "WARNING"}</td>
+                  <td valign="top" align="right" style="${cell} text-align: right;">${badge}</td>
+                </tr>
   `;
 }
 
 function renderDetailCard(c, accentColor) {
   return `
-    <div style="margin-bottom: 16px; background-color: ${NORD.polarNight0}; border: 1px solid ${NORD.polarNight2}; border-left: 4px solid ${accentColor}; border-radius: 4px; padding: 16px;">
+    <div style="margin-bottom: 14px; background-color: ${NORD.polarNight0}; border: 1px solid ${NORD.polarNight2}; border-left: 4px solid ${accentColor}; border-radius: 4px; padding: 14px;">
       <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom: 8px;">
         <tr>
           <td>
-            <span style="font-weight: 700; color: ${NORD.snowStorm2}; font-size: 13px;">${c.check}</span>
+            <span style="font-weight: 700; color: ${NORD.snowStorm2}; font-size: 14px;">${c.check}</span>
             <span style="margin-left: 8px; font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 3px; background-color: ${NORD.polarNight2}; color: ${NORD.snowStorm1};">
               ${c.failureType || "DETERMINISTIC"}
             </span>
@@ -219,7 +227,7 @@ function renderDetailCard(c, accentColor) {
         </tr>
       </table>
       
-      ${c.message ? `<div style="font-size: 12px; color: ${NORD.snowStorm1}; margin-bottom: 12px;">${c.message}</div>` : ""}
+      ${c.message ? `<div style="font-size: 13px; line-height: 1.45; color: ${NORD.snowStorm1}; margin-bottom: 12px;">${c.message}</div>` : ""}
 
       ${renderDynamicData(c.data)}
     </div>
@@ -238,11 +246,13 @@ function renderDynamicData(data) {
     const isTruncated = data.length > maxRows;
     const displayRows = isTruncated ? data.slice(0, maxRows) : data;
 
+    // Wide data tables scroll sideways on phones instead of shrinking the whole email
     return `
-      <table width="100%" cellpadding="6" cellspacing="0" style="border-collapse: collapse; font-size: 11px; background-color: ${NORD.polarNight1}; border-radius: 4px; overflow: hidden; margin-top: 8px;">
+      <div style="width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; margin-top: 8px;">
+      <table cellpadding="6" cellspacing="0" style="border-collapse: collapse; font-size: 12px; background-color: ${NORD.polarNight1}; min-width: 100%;">
         <thead>
           <tr style="background-color: ${NORD.polarNight2}; text-align: left; color: ${NORD.snowStorm2};">
-            ${columns.map((col) => `<th style="padding: 6px 10px; font-weight: 600; text-transform: uppercase;">${col}</th>`).join("")}
+            ${columns.map((col) => `<th style="padding: 6px 10px; font-weight: 600; text-transform: uppercase; white-space: nowrap; text-align: left;">${col}</th>`).join("")}
           </tr>
         </thead>
         <tbody>
@@ -250,7 +260,7 @@ function renderDynamicData(data) {
             .map(
               (row, idx) => `
             <tr style="border-bottom: 1px solid ${NORD.polarNight2}; background-color: ${idx % 2 === 1 ? "rgba(255,255,255,0.02)" : "transparent"}; color: ${NORD.snowStorm1};">
-              ${columns.map((col) => `<td style="padding: 6px 10px; font-family: monospace;">${row[col] !== null && row[col] !== undefined ? row[col] : ""}</td>`).join("")}
+              ${columns.map((col) => `<td style="padding: 6px 10px; font-family: monospace; white-space: nowrap;">${row[col] !== null && row[col] !== undefined ? row[col] : ""}</td>`).join("")}
             </tr>
           `,
             )
@@ -268,6 +278,7 @@ function renderDynamicData(data) {
           }
         </tbody>
       </table>
+      </div>
     `;
   }
 

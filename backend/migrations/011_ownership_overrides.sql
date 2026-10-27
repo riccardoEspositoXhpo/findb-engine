@@ -1,4 +1,4 @@
--- Migration 011: ownership_overrides (replaces portfolios.owner)
+-- Migration 011: ownership_overrides (replaces portfolios.owner, dropped in 012)
 -- Every portfolio is the user's, 100%, unless this table says otherwise. Rows are change points: for a portfolio and
 -- a date, the latest row with start_date <= date gives the user's share (my_share, 0-100); no row = 100%.
 -- Joint account: my_share 50. A portfolio that is only the co-owner's: my_share 0 from its first day. Back to the
@@ -21,4 +21,5 @@ INSERT INTO public.ownership_overrides (portfolio_id, start_date, my_share, note
 VALUES ('TRADE_REPUBLIC', '2026-01-01', 50, 'Joint account with my girlfriend')
 ON CONFLICT DO NOTHING;
 
-ALTER TABLE public.portfolios DROP COLUMN IF EXISTS owner;
+-- portfolios.owner is dropped in 012, applied only once the code that no longer reads it is deployed (the job on
+-- Cloud Run crashed when this migration dropped it before the deploy, 2026-10-27)
