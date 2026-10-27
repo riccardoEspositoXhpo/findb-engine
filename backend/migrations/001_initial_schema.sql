@@ -99,9 +99,7 @@ CREATE TABLE IF NOT EXISTS portfolios (
     liquidation_time_urgent TEXT,
     currency TEXT NOT NULL REFERENCES currencies(currency_code) ON DELETE RESTRICT,
     ivafe_taxable BOOLEAN NOT NULL DEFAULT FALSE,
-    -- XHPO = mine, JOINT = co-owned 50/50 with my girlfriend (her own portfolios would get her code). No history:
-    -- aggregates use the owner as it is when a day is computed (a change applies from then on)
-    owner TEXT NOT NULL DEFAULT 'XHPO',
+    owner TEXT NOT NULL DEFAULT 'XHPO', -- dropped in 011 (ownership_overrides)
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT chk_portfolios_type CHECK (
         portfolio_type IS NULL OR portfolio_type IN (

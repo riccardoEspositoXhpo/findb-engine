@@ -10,26 +10,30 @@ export const aggregates = {
 /**
  * Daily aggregate NAVs: for every aggregate and every day from its start date (getStartDate) to dateStr, the sum of
  * its children (aggregate_tree, nested aggregates resolved recursively): each portfolio's latest nav on or before the
- * day (0 before inception / after closing) x the owner's share x fx into the aggregate currency.
- * Aggregates are the user's wealth: JOINT portfolios count at 50% (portfolios.owner as it is when the day is computed:
- * an ownership change applies from then on, the history already computed stays). Weekly / monthly portfolios carry
- * their latest nav forward, like GAS.
+ * day (0 before inception / after closing) x the user's share that day x fx into the aggregate currency.
+ * Aggregates are the user's wealth: a portfolio is 100% the user's unless ownership_overrides says otherwise from a
+ * date (e.g. a joint account at 50%). Weekly / monthly portfolios carry their latest nav forward, like GAS.
  * Migrated from runAggregateNav + reviseAggregateData in // aggregateData.gs
  *
  * @param {Date|string} [targetDate=new Date()] - Last day computed
  * @returns {Promise<{written: number, from: string|null}>}
  */
 export async function run(targetDate = new Date()) {
-  // Share of a portfolio that is the user's, by portfolios.owner
-  const OWNER_SHARE = { XHPO: 1, JOINT: 0.5 };
-
   const dateStr = utils.formatDateToISO(targetDate);
   console.log(`[AGGREGATES] Starting aggregate NAVs up to ${dateStr}...`);
   await loadFxRates();
 
   const { rows: aggregateRows } = await query(`SELECT aggregate_id, currency FROM aggregates;`);
   const { rows: tree } = await query(`SELECT parent_id, child_id, child_type FROM aggregate_tree;`);
-  const { rows: portfolioRows } = await query(`SELECT portfolio_id, currency, owner, inception_date, closed_date FROM portfolios;`);
+  const { rows: portfolioRows } = await query(`SELECT portfolio_id, currency, inception_date, closed_date FROM portfolios;`);
+  const { rows: overrideRows } = await query(`SELECT portfolio_id, start_date::text AS start_date, my_share::float AS my_share FROM ownership_overrides ORDER BY portfolio_id, start_date;`);
+  const overrides = new Map();
+  for (const row of overrideRows) (overrides.get(row.portfolio_id) ?? overrides.set(row.portfolio_id, []).get(row.portfolio_id)).push(row);
+  // The user's share of a portfolio on a date: the latest override on or before it, 100% when there is none
+  const myShare = (portfolioId, date) => {
+    const applicable = (overrides.get(portfolioId) ?? []).filter((row) => row.start_date <= date).at(-1);
+    return applicable ? applicable.my_share / 100 : 1;
+  };
   const portfolios = new Map(portfolioRows.map((row) => [row.portfolio_id, row]));
   const children = new Map();
   for (const link of tree) (children.get(link.parent_id) ?? children.set(link.parent_id, []).get(link.parent_id)).push(link);
@@ -71,9 +75,7 @@ export async function run(targetDate = new Date()) {
         if (date < inception || (closed && date > closed)) return null;
         const nav = latestNav(id, date);
         if (nav === null) return null;
-        const share = OWNER_SHARE[portfolio.owner];
-        if (share === undefined) throw new Error(`portfolio ${id}: owner "${portfolio.owner}" has no share in OWNER_SHARE`);
-        return nav * share * currencyConverter(portfolio.currency, currency, date);
+        return nav * myShare(id, date) * currencyConverter(portfolio.currency, currency, date);
       }
       if (path.includes(id)) throw new Error(`aggregate_tree cycle: ${[...path, id].join(" -> ")}`);
       const key = `${id}|${currency}`;
@@ -103,8 +105,8 @@ export async function run(targetDate = new Date()) {
 
 /**
  * Where an aggregate has to restart, derived from the data like valuation.getRollStartDate: the day after its latest
- * nav, or earlier when, since its last run (max aggregate_nav.created_at), a nav of one of its portfolios (any depth)
- * or an fx rate of their currencies was written with a past date. No nav yet: the earliest constituent inception.
+ * nav, or earlier when, since its last run (max aggregate_nav.created_at), a nav of one of its portfolios (any depth),
+ * an fx rate of their currencies or an ownership override of one of them was written with a past date. No nav yet: the earliest constituent inception.
  *
  * @param {string} aggregateId
  * @param {string} dateStr - ISO date of the run
@@ -132,7 +134,8 @@ export async function getStartDate(aggregateId, dateStr) {
     SELECT least(
       (SELECT min(n.date) FROM nav n JOIN c USING (portfolio_id) WHERE n.created_at > (SELECT run FROM last) AND n.date <= $2),
       (SELECT min(f.date) FROM fx_rates f WHERE f.created_at > (SELECT run FROM last) AND f.date <= $2
-         AND (f.base_currency IN (SELECT currency FROM c) OR f.quote_currency IN (SELECT currency FROM c)))
+         AND (f.base_currency IN (SELECT currency FROM c) OR f.quote_currency IN (SELECT currency FROM c))),
+      (SELECT min(o.start_date) FROM ownership_overrides o JOIN c USING (portfolio_id) WHERE o.created_at > (SELECT run FROM last) AND o.start_date <= $2)
     )::text AS changed_from;`,
     [aggregateId, lastDate],
   );
