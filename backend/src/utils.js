@@ -15,6 +15,7 @@ export const utils = {
   doesItRunToday,
   readXls,
   readPdfText,
+  parseCsv,
 };
 
 /**
@@ -555,4 +556,41 @@ function readPdfText(buffer) {
       }
     }
   }
+}
+
+/** Minimal CSV -> array of objects keyed by the header (handles quoted fields with commas / doubled quotes). */
+function parseCsv(text) {
+  text = text.replace(/^\uFEFF/, ""); // byte order mark (Trade Republic exports)
+  const records = [];
+  let field = "";
+  let record = [];
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (quoted) {
+      if (char === '"' && text[i + 1] === '"') {
+        field += '"';
+        i++;
+      } else if (char === '"') quoted = false;
+      else field += char;
+    } else if (char === '"') quoted = true;
+    else if (char === ",") {
+      record.push(field);
+      field = "";
+    } else if (char === "\n" || char === "\r") {
+      if (char === "\r" && text[i + 1] === "\n") i++;
+      record.push(field);
+      if (record.some((value) => value !== "")) records.push(record);
+      field = "";
+      record = [];
+    } else field += char;
+  }
+  record.push(field);
+  if (record.some((value) => value !== "")) records.push(record);
+  const [header, ...rows] = records;
+  return rows.map((values) =>
+    Object.fromEntries(
+      header.map((name, i) => [name.trim(), values[i] ?? ""]),
+    ),
+  );
 }

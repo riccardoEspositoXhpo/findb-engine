@@ -21,6 +21,7 @@ export const valuation = {
   runKraken,
   runCryptoCom,
   runAllianz,
+  runTradeRepublic,
 };
 
 /**
@@ -496,8 +497,8 @@ export async function runRecurringFlows(portfolio, dateStr) {
 }
 
 /**
- * CUSTOM: per-portfolio integrations. KRAKEN (API), CRYPTO_COM (CSV by email) and ALLIANZ (xls export by email) are
- * ported; UNREALIZED_TAX (needs tax lots) is not yet; IBKR is closed.
+ * CUSTOM: per-portfolio integrations. KRAKEN (API), CRYPTO_COM and TRADE_REPUBLIC (CSV by email), ALLIANZ (xls export
+ * by email) are ported; UNREALIZED_TAX (needs tax lots) is not yet; IBKR is closed.
  * Migrated from runCustomPortfolio in // portfolioData.gs
  *
  * @returns {Promise<boolean>} true if positions/nav were written
@@ -510,6 +511,8 @@ export async function runCustom(portfolio, dateStr) {
       return runCryptoCom(portfolio, dateStr);
     case "ALLIANZ":
       return runAllianz(portfolio, dateStr);
+    case "TRADE_REPUBLIC":
+      return runTradeRepublic(portfolio, dateStr);
     default:
       console.warn(
         `[VALUATION] ${portfolio.portfolio_id}: CUSTOM not migrated yet, skipping.`,
@@ -892,7 +895,7 @@ export async function runCryptoCom(portfolio, dateStr) {
     let firstNewDate = null;
     let written = 0;
     for (const file of files) {
-      for (const row of parseCsv(file.content.toString("utf-8"))) {
+      for (const row of utils.parseCsv(file.content.toString("utf-8"))) {
         const kind = CRYPTO_COM_KINDS[row["Transaction Kind"]];
         if (!kind)
           throw new Error(
@@ -978,42 +981,6 @@ export async function runCryptoCom(portfolio, dateStr) {
       `[VALUATION] CRYPTO_COM: ${files.length} CSV file(s), ${written} new row(s) written (history until ${historyUntil || "-"}).`,
     );
     return firstNewDate;
-  }
-
-  /** Minimal CSV -> array of objects keyed by the header (handles quoted fields with commas / doubled quotes). */
-  function parseCsv(text) {
-    const records = [];
-    let field = "";
-    let record = [];
-    let quoted = false;
-    for (let i = 0; i < text.length; i++) {
-      const char = text[i];
-      if (quoted) {
-        if (char === '"' && text[i + 1] === '"') {
-          field += '"';
-          i++;
-        } else if (char === '"') quoted = false;
-        else field += char;
-      } else if (char === '"') quoted = true;
-      else if (char === ",") {
-        record.push(field);
-        field = "";
-      } else if (char === "\n" || char === "\r") {
-        if (char === "\r" && text[i + 1] === "\n") i++;
-        record.push(field);
-        if (record.some((value) => value !== "")) records.push(record);
-        field = "";
-        record = [];
-      } else field += char;
-    }
-    record.push(field);
-    if (record.some((value) => value !== "")) records.push(record);
-    const [header, ...rows] = records;
-    return rows.map((values) =>
-      Object.fromEntries(
-        header.map((name, i) => [name.trim(), values[i] ?? ""]),
-      ),
-    );
   }
 }
 
@@ -1155,6 +1122,170 @@ export async function runAllianz(portfolio, dateStr) {
       `[VALUATION] ALLIANZ: ${filename}: ${days.size} investment dates, ${written} new ledger row(s).`,
     );
     return written;
+  }
+}
+
+/**
+ * TRADE_REPUBLIC (no API): the full "Transaction export.csv" from the app is emailed to Gmail, label tradeRepublic.
+ * Every run rebuilds the ledger rows the export implies and syncs them (source TRADE_REPUBLIC, external_id = TR
+ * transaction_id, "<date>:cash" for the daily cash line): new rows are written, rows whose numbers changed (a day
+ * exported again with more card spends) are rewritten, then the portfolio rolls (created_at trigger).
+ * - money in / out of the account (card spends and refunds, transfers, top-ups): ONE net CASHIN / CASHOUT per day
+ * - BUY / SELL: transactions (fee in the transaction; the tax withheld on a sale -> CAPITAL_GAIN_TAX)
+ * - saveback: TR pays the cash reward and buys with it the next day (crypto keeps a few cents): booked as REWARDS of
+ *   the units bought (valued at the amount spent) + REWARDS of the cents left, so the saveback BUY is not a purchase
+ *   and the portfolio's REWARDS = what the saveback earned. The 50 EUR savings plans stay BUYs
+ * - interest: INTEREST (gross) + TAX; staking (FREE_RECEIPT): STAKING units; taxes: TAX (refunds: ADJUST_IN);
+ *   card fees: MANAGEMENT_FEE (refunds: ADJUST_IN); "Tax Credit" cash: ADJUST_IN; MIGRATION deliveries net to zero
+ * An unknown TR type stops the import.
+ *
+ * @returns {Promise<boolean>} true if positions/nav were written
+ */
+export async function runTradeRepublic(portfolio, dateStr) {
+  // Money entering / leaving the account: netted into one cash flow per day
+  const CASH_TYPES = [
+    "CARD_TRANSACTION",
+    "CARD_TRANSACTION_INTERNATIONAL",
+    "CUSTOMER_INPAYMENT",
+    "CUSTOMER_INBOUND",
+    "CUSTOMER_OUTBOUND_REQUEST",
+    "TRANSFER_INBOUND",
+    "TRANSFER_OUTBOUND",
+    "TRANSFER_INSTANT_INBOUND",
+    "TRANSFER_INSTANT_OUTBOUND",
+  ];
+
+  try {
+    for (const file of await readLabelAttachments("tradeRepublic", /\.csv$/i)) await importTradeRepublicCsv(file);
+  } catch (error) {
+    if (/unknown Trade Republic type/.test(error.message)) throw error;
+    console.warn(`[VALUATION] TRADE_REPUBLIC: Gmail read failed (${error.message}), valuing the ledger already saved.`);
+  }
+  return runRoll(portfolio, dateStr);
+
+  async function importTradeRepublicCsv(file) {
+    const portfolioId = portfolio.portfolio_id;
+    const rows = utils.parseCsv(file.content.toString("utf-8")).filter((row) => row.date && row.date <= dateStr);
+    if (!rows.length || !("transaction_id" in rows[0]) || !("type" in rows[0])) {
+      console.warn(`[VALUATION] TRADE_REPUBLIC: ${file.filename} is not a Trade Republic export, skipped.`);
+      return;
+    }
+    const num = (value) => (value ? Number(value) : 0);
+    const days = (from, to) => Math.round((new Date(to) - new Date(from)) / 86400000);
+
+    // Saveback cash -> the BUY made with it within 5 days (same asset when the row names it, a few cents less at most)
+    const buys = rows.filter((row) => row.type === "BUY");
+    const savebackBuy = new Map(); // saveback transaction_id -> BUY row
+    const pairedBuys = new Set();
+    for (const saveback of rows.filter((row) => row.type === "BENEFITS_SAVEBACK")) {
+      const reward = num(saveback.amount);
+      const candidates = buys
+        .filter((buy) => !pairedBuys.has(buy.transaction_id) && (!saveback.symbol || buy.symbol === saveback.symbol))
+        .filter((buy) => days(saveback.date, buy.date) >= 0 && days(saveback.date, buy.date) <= 5)
+        .filter((buy) => -num(buy.amount) <= reward + 0.005 && -num(buy.amount) >= reward - Math.max(0.1, 0.02 * reward))
+        .sort((a, b) => days(saveback.date, a.date) - days(saveback.date, b.date) || Math.abs(reward + num(a.amount)) - Math.abs(reward + num(b.amount)));
+      if (candidates.length) {
+        savebackBuy.set(saveback.transaction_id, candidates[0]);
+        pairedBuys.add(candidates[0].transaction_id);
+      }
+    }
+
+    const target = []; // { table, external_id, type, quantity, options }
+    const flow = (external_id, date, capital_flow_type, security_id, quantity, extra = {}) =>
+      target.push({ table: "capital_flows", external_id, type: capital_flow_type, quantity, options: { date, capital_flow_type, security_id, quantity, ...extra } });
+    const cashByDay = new Map();
+    const migrations = new Map();
+    for (const row of rows) {
+      const id = row.transaction_id;
+      const tax = num(row.tax);
+      const fee = num(row.fee);
+      if (CASH_TYPES.includes(row.type)) {
+        cashByDay.set(row.date, (cashByDay.get(row.date) ?? 0) + num(row.amount) + fee + tax);
+        continue;
+      }
+      switch (row.type) {
+        case "BUY":
+        case "SELL": {
+          if (pairedBuys.has(id)) break; // booked with its saveback
+          const isBuy = row.type === "BUY";
+          target.push({
+            table: "transactions",
+            external_id: id,
+            type: row.type,
+            quantity: Math.abs(num(row.shares)),
+            options: { date: row.date, security_id: row.symbol, transaction_type: row.type, quantity: Math.abs(num(row.shares)), transaction_price: num(row.price), counter_currency: portfolio.currency, market_value_local: Math.abs(num(row.amount)), fee: Math.abs(fee), fee_currency: portfolio.currency },
+          });
+          if (!isBuy && tax < 0) flow(`${id}:tax`, row.date, "CAPITAL_GAIN_TAX", "CASH_EUR", -tax);
+          break;
+        }
+        case "BENEFITS_SAVEBACK": {
+          const buy = savebackBuy.get(id);
+          if (!buy) {
+            flow(id, row.date, "REWARDS", "CASH_EUR", num(row.amount));
+            break;
+          }
+          flow(id, buy.date, "REWARDS", buy.symbol, Math.abs(num(buy.shares)), { market_value_base: -num(buy.amount) });
+          const cents = Number((num(row.amount) + num(buy.amount)).toFixed(2));
+          if (cents > 0) flow(`${id}:cash`, row.date, "REWARDS", "CASH_EUR", cents);
+          break;
+        }
+        case "INTEREST_PAYMENT":
+          flow(id, row.date, "INTEREST", "CASH_EUR", num(row.amount));
+          if (tax) flow(`${id}:tax`, row.date, tax < 0 ? "TAX" : "ADJUST_IN", "CASH_EUR", Math.abs(tax));
+          break;
+        case "FREE_RECEIPT":
+          flow(id, row.date, "STAKING", row.symbol, num(row.shares));
+          break;
+        case "TAX":
+        case "TAX_OPTIMIZATION":
+          if (tax) flow(id, row.date, tax < 0 ? "TAX" : "ADJUST_IN", "CASH_EUR", Math.abs(tax));
+          break;
+        case "CARD_ORDERING_FEE":
+          if (fee) flow(id, row.date, fee < 0 ? "MANAGEMENT_FEE" : "ADJUST_IN", "CASH_EUR", Math.abs(fee));
+          break;
+        case "MANUAL_CASH_TRANSFER":
+          if (num(row.amount)) flow(id, row.date, num(row.amount) > 0 ? "ADJUST_IN" : "ADJUST_OUT", "CASH_EUR", Math.abs(num(row.amount)));
+          break;
+        case "MIGRATION": {
+          const key = `${row.date}|${row.symbol}`;
+          migrations.set(key, (migrations.get(key) ?? 0) + num(row.shares));
+          break;
+        }
+        default:
+          throw new Error(`unknown Trade Republic type "${row.type}" (${row.date}, ${id}): classify it in runTradeRepublic`);
+      }
+    }
+    for (const [date, net] of cashByDay) {
+      const amount = Number(net.toFixed(2));
+      if (amount) flow(`${date}:cash`, date, amount > 0 ? "CASHIN" : "CASHOUT", "CASH_EUR", Math.abs(amount));
+    }
+    for (const [key, net] of migrations) {
+      const [date, symbol] = key.split("|");
+      if (Math.abs(net) > 1e-9) flow(`${key}:migration`, date, net > 0 ? "ASSETIN" : "ASSETOUT", symbol, Math.abs(net));
+    }
+
+    // Sync with what is saved: new -> written; same id with other numbers -> rewritten; the rest untouched
+    const { rows: saved } = await query(
+      `SELECT 'transactions' AS tbl, external_id, transaction_type::text AS type, quantity::float AS quantity FROM transactions WHERE source = 'TRADE_REPUBLIC' AND portfolio_id = $1
+       UNION ALL
+       SELECT 'capital_flows', external_id, capital_flow_type, quantity::float FROM capital_flows WHERE source = 'TRADE_REPUBLIC' AND portfolio_id = $1;`,
+      [portfolioId],
+    );
+    const savedById = new Map(saved.map((row) => [`${row.tbl}|${row.external_id}`, row]));
+    let written = 0;
+    let rewritten = 0;
+    for (const item of target) {
+      const known = savedById.get(`${item.table}|${item.external_id}`);
+      if (known && known.type === item.type && Math.abs(known.quantity - item.quantity) < 1e-9) continue;
+      if (known) {
+        await query(`DELETE FROM ${item.table} WHERE source = 'TRADE_REPUBLIC' AND portfolio_id = $1 AND external_id = $2`, [portfolioId, item.external_id]);
+        rewritten++;
+      }
+      const options = { ...item.options, portfolio_id: portfolioId, source: "TRADE_REPUBLIC", external_id: item.external_id };
+      await (item.table === "transactions" ? ledger.addTransaction(options) : ledger.addCapitalFlow(options));
+      written++;
+    }
+    console.log(`[VALUATION] TRADE_REPUBLIC: ${file.filename}: ${rows.length} rows -> ${target.length} ledger rows, ${written} written (${rewritten} rewritten), ${savebackBuy.size} saveback(s) paired.`);
   }
 }
 

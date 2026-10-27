@@ -144,3 +144,17 @@ Label `directa`, parsed by `scrapeEmails.parseDirecta` into events (the normal d
 - `utils.readPdfText`: no-dependency PDF text reader (inflate streams, Tj/TJ strings inside BT..ET blocks only — the page stream carries a 26 MB inline image).
 - Reconciliation vs the GAS ledger: 87/91 orders identical; the emails fixed the 2026-05-25 monthly buy GAS never booked (VWCE 13, EXXY 6, XDEM 2), XDEM 2026-04-23 (2 units, not 3), two transfers (3050 on 2025-03-29, 2900 on 2025-07-08), the fees of the 2024 certificates and the 14.80 withholding on the 2026-10-20 sale.
 - `claude/tools/migrateDirecta.mjs` (user OK): deleted the DIRECTA transactions (except 2025-07-23 XDEM, note not in the label), CASHIN and duplicate TRANSACTION_FEE flows, GAS PURCHASE / SALE / INFLOW events; scraped, processed (112 events, 0 failed), rolled from inception. Kept: coupons + tax, CASHOUTs, ADJUST_OUT 2024-06-22.
+
+### [OWNER] joint portfolios (2026-10-27)
+`portfolios.owner`: `XHPO` (mine), `JOINT` (co-owned 50/50 with my girlfriend), her own code for her portfolios (not created yet). TRADE_REPUBLIC became JOINT (user updated it). Kept as a single column on purpose (no ownership table): no history, so aggregates count a JOINT portfolio at 50% for its whole life. Portfolio-level positions / nav / performance stay at 100%; the share applies only in aggregates (mine = XHPO + 50% JOINT, household = everything at 100%). A CHECK on the allowed values waits for her code.
+
+### [TRADE-REPUBLIC-CSV] TRADE_REPUBLIC from the app export (2026-10-27)
+The app's full "Transaction export.csv" (806 rows since 2024-11-09, transaction_id per row) is emailed to Gmail, label `tradeRepublic`. `valuation.runTradeRepublic` (CUSTOM) rebuilds the implied ledger rows and syncs them (source TRADE_REPUBLIC, external_id = transaction_id / `<date>:cash`; changed rows rewritten, nothing duplicated), then rolls.
+- One net CASHIN / CASHOUT per day for money in / out (card spends + refunds, transfers, top-ups) — user rule.
+- BUY / SELL transactions (fee inside; sale tax -> CAPITAL_GAIN_TAX). Saveback: TR pays the cash then buys with it within 5 days (crypto keeps a few cents) -> REWARDS of the units bought + REWARDS of the cents left, the saveback BUY dropped; the 50 EUR savings plans stay BUYs. Total saveback = 230.71 EUR (22/22 paired).
+- INTEREST (gross) + TAX; FREE_RECEIPT -> STAKING; TAX / TAX_OPTIMIZATION -> TAX (refunds ADJUST_IN); card fees -> MANAGEMENT_FEE (refund ADJUST_IN); "Tax Credit" -> ADJUST_IN; MIGRATION deliveries net to zero. Unknown type stops the import.
+- `claude/tools/migrateTradeRepublic.mjs` (user OK): GAS ledger deleted (it missed the crypto savings plans, saveback, interest, staking, taxes), rebuilt, rolled from inception. Matches the app on 2026-10-27 exactly: cash 2,071.60, IE0008UEVOE0 0.766989, SOL 2.164594, ETH 0.134939, BTC 0.003667; nav 2,811.27.
+- `utils.parseCsv` (moved out of runCryptoCom: now shared; strips the BOM).
+
+### [AGGREGATES-DECISIONS] for the aggregate NAV step (2026-10-27)
+Aggregates (13, from the GAS snapshot) all represent the user's wealth: JOINT portfolios at 50%. Tree fixes when loading: REVOLUT -> BANK (was in no aggregate), UNREALIZED_TAX -> LT_DEBT (not subtracted from liquid).
