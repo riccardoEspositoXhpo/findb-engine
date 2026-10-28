@@ -16,6 +16,11 @@ CREATE TABLE IF NOT EXISTS public.ownership_overrides (
     CONSTRAINT chk_ownership_overrides_share CHECK (my_share BETWEEN 0 AND 100)
 );
 
+-- RLS like every other table (001)
+ALTER TABLE public.ownership_overrides ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "allow_all_authenticated" ON public.ownership_overrides;
+CREATE POLICY "allow_all_authenticated" ON public.ownership_overrides FOR ALL TO authenticated USING (true) WITH CHECK (true);
+
 -- TRADE_REPUBLIC became a joint account (50/50 with my girlfriend); counted as joint from 2026-01-01 (user)
 INSERT INTO public.ownership_overrides (portfolio_id, start_date, my_share, notes)
 VALUES ('TRADE_REPUBLIC', '2026-01-01', 50, 'Joint account with my girlfriend')

@@ -498,7 +498,8 @@ export async function runRecurringFlows(portfolio, dateStr) {
 
 /**
  * CUSTOM: per-portfolio integrations. KRAKEN (API), CRYPTO_COM and TRADE_REPUBLIC (CSV by email), ALLIANZ (xls export
- * by email) are ported; UNREALIZED_TAX (needs tax lots) is not yet; IBKR is closed.
+ * by email) are ported; UNREALIZED_TAX is valued by taxes.run after valuation (it needs today's positions of every
+ * other portfolio); IBKR is closed.
  * Migrated from runCustomPortfolio in // portfolioData.gs
  *
  * @returns {Promise<boolean>} true if positions/nav were written
@@ -513,6 +514,9 @@ export async function runCustom(portfolio, dateStr) {
       return runAllianz(portfolio, dateStr);
     case "TRADE_REPUBLIC":
       return runTradeRepublic(portfolio, dateStr);
+    case "UNREALIZED_TAX":
+      console.log(`[VALUATION] UNREALIZED_TAX: valued by taxes.run after valuation.`);
+      return false;
     default:
       console.warn(
         `[VALUATION] ${portfolio.portfolio_id}: CUSTOM not migrated yet, skipping.`,

@@ -14,6 +14,7 @@ import { events } from "../src/events.js";
 import { scrapeEmails } from "../src/scrapeEmails.js";
 import { valuation } from "../src/valuation.js";
 import { aggregates } from "../src/aggregates.js";
+import { taxes } from "../src/taxes.js";
 import { sendQcEmail } from "../src/qcNotification.js";
 
 async function executePipeline() {
@@ -36,7 +37,11 @@ async function executePipeline() {
   // its last run)
   await aggregates.run(config.date);
 
-  // 6. Overnight Quality Control Engine
+  // 6. Taxes: LIFO position lots from the whole ledger, yearly tax items, and the UNREALIZED_TAX portfolio (estimated
+  // tax on today's unrealized gains), so it must run after valuation and before the aggregates
+  await taxes.run(config.date);
+
+  // n. Overnight Quality Control Engine
   // In dry-run mode, QC queries the same uncommitted transaction client and verifies actual data
   const qcResults = await overnightQC.runAll(config.date);
 
