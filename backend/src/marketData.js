@@ -1,15 +1,149 @@
 import { utils } from "./utils.js";
-import { query, replaceDataInDb } from "./db.js";
+import { query, replaceDataInDb, withSavepoint } from "./db.js";
 import { config } from "../config.js";
-import { fetchSecurityPrice } from "./priceProviders.js";
+import { fetchSecurityPrice, fetchSecurityDividends } from "./priceProviders.js";
 
 export const marketData = {
   run,
   calculateDailyFx,
   calculateCryptoDailyFx,
+  calculateSecurityIncome,
+  calculateProxyPrices,
   loadFxRates,
   currencyConverter,
 };
+
+// A security's own price is stale (proxy kicks in) when the next one is more than this many days away, by frequency:
+// one coarser period (daily -> a week, weekly -> a month, monthly -> a quarter)
+const PROXY_STALE_DAYS = { DLY: 7, BIZ: 7, WKL: 31, MTH: 92 };
+// Nightly window: proxy prices are rebuilt from the last anchor before this many days ago (late official prices)
+const PROXY_LOOKBACK_DAYS = 120;
+// The proxy needs its own price within this many days of an anchor to rescale from it
+const PROXY_BASE_MAX_AGE_DAYS = 7;
+
+/**
+ * Prices of the securities with a price_proxy: each official price (any source but PROXY) is an anchor; when the next
+ * anchor (or targetDate) is further than PROXY_STALE_DAYS for the security's frequency, every day the proxy has a
+ * price in between gets price(d) = anchor price x proxy(d) / proxy(anchor date) (proxy on or before the anchor date,
+ * within PROXY_BASE_MAX_AGE_DAYS). One anchor is enough: the proxy gives the movement, the anchor the level; every new
+ * official price re-anchors. PROXY rows in the window are deleted and rebuilt, so a late official price rewrites the
+ * days after it. Anchors closer than the stale limit leave the days between them to carry forward.
+ *
+ * @param {Date|string} [targetDate=new Date()]
+ * @param {Object} [options={}] - { from: ISO date (default targetDate - PROXY_LOOKBACK_DAYS), runOnlyThisId }
+ * @returns {Promise<number>} proxy prices written
+ */
+export async function calculateProxyPrices(targetDate = new Date(), options = {}) {
+  const to = utils.formatDateToISO(targetDate);
+  const from = options.from ?? utils.addDays(to, -PROXY_LOOKBACK_DAYS);
+  const { rows: securities } = await query(
+    `SELECT security_id, price_proxy, valuation_frequency FROM security_master WHERE price_proxy IS NOT NULL ${options.runOnlyThisId ? "AND security_id = $1" : ""};`,
+    options.runOnlyThisId ? [options.runOnlyThisId] : [],
+  );
+  let written = 0;
+  for (const security of securities) {
+    const staleDays = PROXY_STALE_DAYS[security.valuation_frequency] ?? PROXY_STALE_DAYS.DLY;
+    // Anchors in the window + the last one before it
+    const { rows: anchors } = await query(
+      `SELECT date::text, price::float FROM prices
+       WHERE security_id = $1 AND source IS DISTINCT FROM 'PROXY' AND date <= $3
+         AND date >= coalesce((SELECT max(date) FROM prices WHERE security_id = $1 AND source IS DISTINCT FROM 'PROXY' AND date < $2), $2)
+       ORDER BY date;`,
+      [security.security_id, from, to],
+    );
+    if (anchors.length === 0) {
+      console.warn(`[PROXY PRICES] ${security.security_id}: no official price to anchor on, skipped.`);
+      continue;
+    }
+    const { rows: proxyPrices } = await query(
+      `SELECT date::text, price::float FROM prices WHERE security_id = $1 AND date >= $2 AND date <= $3 ORDER BY date;`,
+      [security.price_proxy, utils.addDays(anchors[0].date, -PROXY_BASE_MAX_AGE_DAYS), to],
+    );
+    const rows = [];
+    anchors.forEach((anchor, index) => {
+      const until = anchors[index + 1]?.date ?? utils.addDays(to, 1);
+      if (utils.daysBetween(anchor.date, until).length - 1 <= staleDays) return;
+      const base = proxyPrices.filter((p) => p.date <= anchor.date).at(-1);
+      if (!base || utils.daysBetween(base.date, anchor.date).length - 1 > PROXY_BASE_MAX_AGE_DAYS) {
+        console.warn(`[PROXY PRICES] ${security.security_id}: no ${security.price_proxy} price near the anchor ${anchor.date}, days after it not proxied.`);
+        return;
+      }
+      for (const p of proxyPrices)
+        if (p.date > anchor.date && p.date < until)
+          rows.push({ date: p.date, security_id: security.security_id, price: Number(((anchor.price * p.price) / base.price).toFixed(5)), source: "PROXY" });
+    });
+    // Upsert (created_at moves only when a price changes, so portfolios don't re-roll every night) and drop the proxy
+    // rows the anchors no longer produce
+    await withSavepoint(async () => {
+      await query(`DELETE FROM prices WHERE security_id = $1 AND source = 'PROXY' AND date > $2 AND date <= $3 AND NOT (date::text = ANY($4));`, [security.security_id, anchors[0].date, to, rows.map((r) => r.date)]);
+      if (rows.length > 0) await replaceDataInDb(rows, "prices");
+    });
+    written += rows.length;
+    console.log(`[PROXY PRICES] ${security.security_id}: ${rows.length} proxy price(s) from ${security.price_proxy} after ${anchors.length} anchor(s) since ${anchors[0].date}.`);
+  }
+  return written;
+}
+
+// Asset types that pay distributions per unit (bonds / structured products pay coupons, not tracked here)
+const INCOME_ASSET_TYPES = ["ETF", "STOCK"];
+// Nightly lookback for dividends: catches ex-dates the feed publishes a few days late
+const INCOME_LOOKBACK_DAYS = 30;
+
+/**
+ * Downloads the cash distributions (dividends) of every ETF / STOCK with a price source that has a dividend feed
+ * (EODHD, Yahoo) into security_income, keyed on the ex-dividend date. Same source and ticker as the price, so
+ * amount and price share currency and listing. Ex-dates after targetDate (announced, not yet ex) are left for later.
+ * Migrated from downloadDividends in // securityData.gs (Polygon, US tickers only, keyed on the pay date)
+ *
+ * @param {Date|string} [targetDate=new Date()] - Last ex-date fetched
+ * @param {Object} [options={}] - { from: ISO date (default targetDate - 30 days), runOnlyThisId }
+ * @returns {Promise<Array>} rows written
+ */
+export async function calculateSecurityIncome(targetDate = new Date(), options = {}) {
+  const to = utils.formatDateToISO(targetDate);
+  const from = options.from ?? utils.addDays(to, -INCOME_LOOKBACK_DAYS);
+  console.log(`[INCOME] Starting security income ${from} -> ${to}...`);
+
+  const { rows: securities } = await query(
+    `SELECT * FROM security_master WHERE source IN ('EODHD', 'YAHOO') AND asset_type = ANY($1) ${options.runOnlyThisId ? "AND security_id = $2" : ""} ORDER BY security_id;`,
+    options.runOnlyThisId ? [INCOME_ASSET_TYPES, options.runOnlyThisId] : [INCOME_ASSET_TYPES],
+  );
+
+  const rows = [];
+  for (const sec of securities) {
+    try {
+      const dividends = (await fetchSecurityDividends(sec, from, to)).filter((div) => div.ex_date && div.ex_date <= to && div.amount > 0);
+      rows.push(...mergeDistributions(dividends.map((div) => ({ security_id: sec.security_id, ...div, source: sec.source }))));
+    } catch (err) {
+      // One feed failing doesn't stop the others
+      console.warn(`[INCOME] Warning: dividends of ${sec.security_id} (${sec.source}) failed: ${err.message}`);
+    }
+  }
+
+  if (rows.length > 0) await replaceDataInDb(rows, "security_income");
+  console.log(`[INCOME] Done: ${securities.length} securities checked, ${rows.length} distribution(s) in the window.`);
+  return rows;
+}
+
+/**
+ * One row per security and ex-date: the same distribution listed twice (same amount and pay date, e.g. re-declared)
+ * counts once, different distributions on the same ex-date (regular + special) are summed.
+ *
+ * @param {Array} distributions - { security_id, ex_date, pay_date, amount, currency, source }
+ * @returns {Array} merged rows
+ */
+export function mergeDistributions(distributions) {
+  const byKey = new Map();
+  for (const div of distributions) {
+    const key = `${div.security_id}|${div.ex_date}`;
+    const merged = byKey.get(key) ?? byKey.set(key, { ...div, amount: 0, seen: new Set() }).get(key);
+    const identity = `${div.amount}|${div.pay_date}`;
+    if (merged.seen.has(identity)) continue;
+    merged.seen.add(identity);
+    merged.amount += div.amount;
+  }
+  return [...byKey.values()].map(({ seen, ...row }) => row);
+}
 
 /**
  * Downloads prices for all eligible securities in security_master and commits via replaceDataInDb.
@@ -110,6 +244,7 @@ export async function calculatePrices(targetDate = new Date(), options = {}) {
         date: priceDateStr,
         security_id: sec.security_id,
         price: parsedPrice,
+        source: sec.source,
       });
 
       // Log retroactive historical price updates
@@ -691,7 +826,11 @@ export async function run(targetDate = new Date()) {
     calculateDailyFx(targetDate),
     calculateCryptoDailyFx(targetDate),
     calculatePrices(targetDate),
+    calculateSecurityIncome(targetDate),
   ]);
+
+  // Proxied securities move with their proxy's prices just written
+  await calculateProxyPrices(targetDate);
 
   // New rates were just written: reload the in-memory fx cache for everything downstream
   await loadFxRates({ force: true });

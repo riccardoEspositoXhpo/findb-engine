@@ -1,0 +1,27 @@
+-- Migration 014: security income + security performance recompute window
+-- 1. security_income: cash distributions per unit of an ETF / STOCK, keyed on the ex-dividend date (the day the price
+--    drops by it and the market convention for total return: MSCI / S&P total-return indices, GIPS accrual). Fetched
+--    nightly from the security's price source (marketData.calculateSecurityIncome: EODHD /api/div, Yahoo chart
+--    events), history from EODHD + the GAS income tab (Polygon) for securities no longer priced. amount = raw
+--    (unadjusted) amount per unit in `currency`, like the prices we store.
+-- 2. security_performance.created_at: when a brick was last written, so the nightly run restarts each security from
+--    the earliest price / income written since (same pattern as ROLL and aggregates).
+
+CREATE TABLE IF NOT EXISTS public.security_income (
+    security_id TEXT NOT NULL REFERENCES public.security_master(security_id) ON DELETE CASCADE,
+    ex_date DATE NOT NULL,
+    pay_date DATE,
+    amount NUMERIC NOT NULL,
+    currency TEXT NOT NULL,
+    source TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT pk_security_income PRIMARY KEY (security_id, ex_date),
+    CONSTRAINT chk_security_income_amount CHECK (amount > 0)
+);
+
+ALTER TABLE public.security_performance ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+-- RLS like every other table (001)
+ALTER TABLE public.security_income ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "allow_all_authenticated" ON public.security_income;
+CREATE POLICY "allow_all_authenticated" ON public.security_income FOR ALL TO authenticated USING (true) WITH CHECK (true);

@@ -1106,7 +1106,7 @@ export async function runAllianz(portfolio, dateStr) {
         written++;
       }
       for (const [securityId, fund] of day.funds) {
-        prices.push({ date, security_id: securityId, price: fund.price });
+        prices.push({ date, security_id: securityId, price: fund.price, source: "ALLIANZ" });
         if (savedIds.has(`${date}:${securityId}`)) continue;
         await ledger.addTransaction({
           ...common,

@@ -263,6 +263,74 @@ async function fetchFromTrustnet(sec, targetDate) {
 }
 
 // ============================================================================
+// DIVIDEND PROVIDERS (same source and ticker as the price)
+// ============================================================================
+
+/**
+ * EODHD /api/div: every distribution between from and to. `date` is the ex-dividend date; unadjustedValue is the
+ * amount actually paid per unit (value is split-adjusted), matching the raw prices we store.
+ *
+ * @returns {Promise<Array<{ex_date: string, pay_date: string|null, amount: number, currency: string}>>}
+ */
+async function fetchDividendsFromEodhd(sec, from, to) {
+  const ticker = (sec.source_id || "").trim();
+  if (!config.eodhdToken) throw new Error("EODHD API token is missing from environment.");
+  if (!ticker) throw new Error(`Missing source_id (ticker) for EODHD security ${sec.security_id}`);
+
+  const url = `https://eodhd.com/api/div/${encodeURIComponent(ticker)}?api_token=${config.eodhdToken}&fmt=json&from=${from}&to=${to}`;
+  const res = await fetch(url, { headers: HTTP_HEADERS });
+  if (!res.ok) throw new Error(`EODHD dividends HTTP ${res.status} for ${sec.security_id} (${ticker})`);
+  const data = await res.json();
+  if (!Array.isArray(data)) return [];
+  return data.map((div) => ({
+    ex_date: div.date,
+    pay_date: div.paymentDate || null,
+    amount: parseFloat(div.unadjustedValue ?? div.value),
+    currency: div.currency || sec.currency,
+  }));
+}
+
+/**
+ * Yahoo chart events: distributions between from and to (event date = ex-dividend date), in the quote currency.
+ *
+ * @returns {Promise<Array<{ex_date: string, pay_date: null, amount: number, currency: string}>>}
+ */
+async function fetchDividendsFromYahoo(sec, from, to) {
+  const ticker = (sec.source_id || sec.security_id).trim();
+  const yahooFinance = new YahooFinance();
+  const result = await yahooFinance.chart(ticker, {
+    period1: new Date(`${from}T00:00:00Z`),
+    period2: new Date(`${utils.addDays(to, 1)}T00:00:00Z`),
+    interval: "1d",
+    events: "div",
+  });
+  return (result?.events?.dividends || []).map((div) => ({
+    ex_date: utils.formatDateToISO(new Date(div.date)),
+    pay_date: null,
+    amount: parseFloat(div.amount),
+    currency: result?.meta?.currency || sec.currency,
+  }));
+}
+
+/**
+ * Routes a security_master row to the dividend feed of its price source. Sources without one return [].
+ *
+ * @param {Object} sec - Security master record
+ * @param {string} from - ISO date, first ex-date wanted
+ * @param {string} to - ISO date, last ex-date wanted
+ */
+export async function fetchSecurityDividends(sec, from, to) {
+  switch ((sec.source || "").toUpperCase().trim()) {
+    case "EODHD":
+      return fetchDividendsFromEodhd(sec, from, to);
+    case "YAHOO":
+      return fetchDividendsFromYahoo(sec, from, to);
+    default:
+      return [];
+  }
+}
+
+// ============================================================================
 // PUBLIC DISPATCHER
 // ============================================================================
 
