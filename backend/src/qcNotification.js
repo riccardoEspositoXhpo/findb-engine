@@ -26,6 +26,7 @@ export function buildQcEmailHtml(qcResults, targetDate = new Date()) {
   const checks = Array.isArray(qcResults?.results) ? qcResults.results : [];
 
   const passedCount = checks.filter((c) => c.passed).length;
+  const failedChecks = checks.filter((c) => !c.passed);
   const criticalCount = checks.filter(
     (c) => !c.passed && c.severity === "CRITICAL",
   ).length;
@@ -110,19 +111,24 @@ export function buildQcEmailHtml(qcResults, targetDate = new Date()) {
             </td>
           </tr>
 
-          <!-- SUMMARY -->
+          <!-- SUMMARY: only the checks that failed or warned (the KPI strip above counts them all) -->
           <tr>
             <td class="section" style="padding: 22px 28px;">
               <div style="margin: 0 0 12px 0; font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: ${NORD.snowStorm2};">Checks</div>
-              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse; font-size: 14px;">
+              ${
+                failedChecks.length === 0
+                  ? `<div style="font-size: 14px; color: ${NORD.auroraGreen};">All ${checks.length} checks passed.</div>`
+                  : `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse; font-size: 14px;">
                 <tr style="text-align: left; color: ${NORD.snowStorm0};">
                   <th align="left" style="padding: 8px 10px; font-weight: 600; font-size: 12px; border-bottom: 1px solid ${NORD.polarNight3};">Check</th>
                   <th class="hide-mobile" align="left" style="padding: 8px 10px; font-weight: 600; font-size: 12px; border-bottom: 1px solid ${NORD.polarNight3};">Type</th>
                   <th class="hide-mobile" align="left" style="padding: 8px 10px; font-weight: 600; font-size: 12px; border-bottom: 1px solid ${NORD.polarNight3};">Severity</th>
                   <th align="right" style="padding: 8px 10px; font-weight: 600; font-size: 12px; border-bottom: 1px solid ${NORD.polarNight3};">Status</th>
                 </tr>
-                ${checks.map((c, idx) => renderSummaryRow(c, idx)).join("")}
+                ${failedChecks.map((c, idx) => renderSummaryRow(c, idx)).join("")}
               </table>
+              <div style="margin-top: 10px; font-size: 12px; color: ${NORD.snowStorm0};">${passedCount} other check(s) passed.</div>`
+              }
             </td>
           </tr>
 
