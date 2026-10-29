@@ -25,12 +25,6 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Test Cloud Run Job
-        run: |
-          gcloud run jobs execute ${{ env.JOB_NAME }} \
-            --region ${{ env.REGION }} \
-            --update-env-vars DRY_RUN=true \
-            --wait
       - name: Deploy Cloud Run Job from GitHub Repo
         run: |
           gcloud run jobs deploy ${{ env.JOB_NAME }} \
@@ -38,3 +32,11 @@ jobs:
             --region ${{ env.REGION }} \
             --max-retries 1 \
             --task-timeout 10m
+
+      # Dry run (transaction rolled back) of the image just deployed: before the deploy it tested the old code
+      - name: Test Cloud Run Job
+        run: |
+          gcloud run jobs execute ${{ env.JOB_NAME }} \
+            --region ${{ env.REGION }} \
+            --update-env-vars DRY_RUN=true \
+            --wait
