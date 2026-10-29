@@ -4,8 +4,9 @@
 --    nightly from the security's price source (marketData.calculateSecurityIncome: EODHD /api/div, Yahoo chart
 --    events), history from EODHD + the GAS income tab (Polygon) for securities no longer priced. amount = raw
 --    (unadjusted) amount per unit in `currency`, like the prices we store.
--- 2. security_performance.created_at: when a brick was last written, so the nightly run restarts each security from
---    the earliest price / income written since (same pattern as ROLL and aggregates).
+-- 2. security_performance / portfolio_performance / portfolio_nav_return.created_at: when a brick was last written, so
+--    the nightly run restarts from the earliest price / income / nav / ledger row written since (same pattern as ROLL
+--    and aggregates; the aggregate tables have it since 001).
 
 CREATE TABLE IF NOT EXISTS public.security_income (
     security_id TEXT NOT NULL REFERENCES public.security_master(security_id) ON DELETE CASCADE,
@@ -20,6 +21,8 @@ CREATE TABLE IF NOT EXISTS public.security_income (
 );
 
 ALTER TABLE public.security_performance ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE public.portfolio_performance ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE public.portfolio_nav_return ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
 -- RLS like every other table (001)
 ALTER TABLE public.security_income ENABLE ROW LEVEL SECURITY;

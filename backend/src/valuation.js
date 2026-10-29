@@ -313,11 +313,20 @@ export async function rollPortfolio(
       priceSeries.get(row.security_id) ??
       priceSeries.set(row.security_id, []).get(row.security_id)
     ).push([row.date, Number(row.price)]);
-  const warnings = [];
-  const priceOn = async (securityId, date) => {
-    if (UNIT_VALUED.includes((await ledger.getSecurity(securityId)).asset_type))
-      return 1;
-    const series = priceSeries.get(securityId) ?? [];
+  // Before a security's first price (bought before it is quoted, e.g. a structured product on its issue day): the
+  // portfolio's own trade price, not 0 (DIRECTA 2024-02-15: nav 5,000 -> 110.90 -> 5,009 the day after)
+  const { rows: tradePriceRows } = await query(
+    `SELECT security_id, date::text AS date, transaction_price FROM transactions
+     WHERE portfolio_id = $1 AND date <= $2 AND transaction_price IS NOT NULL ORDER BY security_id, date, transaction_id;`,
+    [portfolioId, stopDate],
+  );
+  const tradePriceSeries = new Map();
+  for (const row of tradePriceRows)
+    (
+      tradePriceSeries.get(row.security_id) ??
+      tradePriceSeries.set(row.security_id, []).get(row.security_id)
+    ).push([row.date, Number(row.transaction_price)]);
+  const latestOn = (series, date) => {
     let low = 0;
     let high = series.length - 1;
     let found = null;
@@ -328,6 +337,15 @@ export async function rollPortfolio(
         low = mid + 1;
       } else high = mid - 1;
     }
+    return found;
+  };
+  const warnings = [];
+  const priceOn = async (securityId, date) => {
+    if (UNIT_VALUED.includes((await ledger.getSecurity(securityId)).asset_type))
+      return 1;
+    const found =
+      latestOn(priceSeries.get(securityId) ?? [], date) ??
+      latestOn(tradePriceSeries.get(securityId) ?? [], date);
     if (found === null)
       warnings.push(
         `${date} ${securityId}: no price on or before, valued at 0`,
