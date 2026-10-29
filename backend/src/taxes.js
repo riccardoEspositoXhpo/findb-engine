@@ -27,9 +27,9 @@ const cryptoRate = (year) => (year >= 2026 ? 33 : 26);
 const EPS = 1e-9;
 
 /**
- * Nightly tax step, after valuation (needs today's positions): LIFO lots from the whole ledger (open_lots,
- * closed_lots ENGINE rows), yearly tax items (tax_items), and the UNREALIZED_TAX portfolio for the day (one negative
- * DEBT_EUR line = Σ est_tax_eur of the open lots).
+ * Nightly tax step, after valuation (needs today's positions): lots from the whole ledger (open_lots: one row per
+ * holding, closed_lots ENGINE rows: one per sale), yearly tax items (tax_items), and the UNREALIZED_TAX portfolio for
+ * the day (one negative DEBT_EUR line = Σ est_tax_eur of the open lots).
  * Migrated from positionLotCalculator + runTaxLots + runUnrealizedTax in // taxCalculations.gs, portfolioData.gs
  *
  * @param {Date|string} [targetDate=new Date()]
@@ -64,22 +64,28 @@ export async function run(targetDate = new Date()) {
 }
 
 /**
- * LIFO lots over the whole ledger up to dateStr, one lot per purchase (or receipt), all portfolios in one
- * chronological pass (per day: inflows, transactions, outflows, then paired ASSETINs), so a transfer's lots always
- * exist when its ASSETIN needs them. A closed lot is the piece of one open lot a sale used up: same lot_id (the
- * purchase: T<transaction_id> / F<capital_flow_id>), acquired_date and orig_price.
+ * Lots over the whole ledger up to dateStr, all portfolios in one chronological pass (per day: inflows, transactions,
+ * outflows, then paired ASSETINs), so a transfer's lots always exist when its ASSETIN needs them. In memory there is
+ * one lot per purchase (or receipt); what is written is one open lot per holding (portfolio x security: quantity,
+ * cost, average price) and one closed lot per sale. The cost a sale takes depends on the security (user, 2026-10-29):
+ * - crypto: LIFO, the newest lots first (Agenzia delle Entrate: like foreign currencies)
+ * - everything else: weighted average cost (art. 68 c.6 TUIR, what the brokers apply): every lot gives up the same
+ *   share, so the average price of what is left doesn't move
+ * Rules:
  * - cash (fiat) and stablecoins never form lots
  * - BUY with cash / stablecoin: new lot, cost = price paid + fee
- * - asset -> cash / stablecoin (fiscally relevant): consumes LIFO, one closed lot per lot used. Sold value and sale
- *   fee split by quantity; taxable = gross - cost (Directa note), realized_pnl = gross - fee - cost
+ * - asset -> cash / stablecoin (fiscally relevant): consumes lots, one closed lot for the sale. Taxable = gross - cost
+ *   (Directa note), realized_pnl = gross - fee - cost
  * - asset -> asset (crypto <-> crypto): not a realization, the consumed cost (+ fee) moves to a new lot of what was
  *   received
  * - received for free (STAKING, REWARDS, ADJUST_IN, unpaired ASSETIN...): new lot at its value that day
  * - ASSETOUT paired in lot_transfers: the lots travel with their lot_id, acquisition date and EUR cost; other
  *   outflows (ADJUST_OUT, fees paid in an asset, unpaired ASSETOUT) just consume lots
  * - cost kept in EUR at the acquisition date's fx: the Italian gain is EUR proceeds - EUR cost
- * - open lots valued at the portfolio's latest positions on or before dateStr (closed portfolios: no current values)
- * - selling more than the lots hold is a finding (SHORT_LOTS), as are unpaired transfers and flows without a value
+ * - open lots valued at the portfolio's latest positions on or before dateStr (closed portfolios: none)
+ * - selling more than the lots hold is a finding (SHORT_LOTS), as are unpaired transfers and flows without a value.
+ *   The missing quantity stays owed, like the negative position it is: the next inflow of that security (often the
+ *   ADJUST_IN that zeroes the position) pays it back before opening a lot
  * New transfers are paired here and saved to lot_transfers (AUTO); existing pairs are never changed.
  *
  * @param {string} dateStr - ISO date, last ledger day
@@ -95,6 +101,7 @@ export async function computeLots(dateStr) {
 
   const securityFor = (currency) => (securities.has(`CASH_${currency}`) ? `CASH_${currency}` : currency);
   const isCashLike = (securityId) => ["CASH", "DEBT"].includes(securities.get(securityId)?.asset_type) || stablecoins.has(securityId);
+  const costMethod = (securityId) => (securities.get(securityId)?.asset_type === "CRYPTO" ? "LIFO" : "AVG");
   const toEur = (amount, currency, date) => {
     const rate = currencyConverter(currency, "EUR", date);
     return rate === null || amount === null ? null : amount * rate;
@@ -145,36 +152,61 @@ export async function computeLots(dateStr) {
 
   const book = new Map(); // portfolio|security -> lots, newest last (LIFO takes from the end)
   const inTransit = new Map(); // ASSETOUT id -> consumed lots
+  const owed = new Map(); // portfolio|security -> quantity sold beyond the lots, not yet received back
   const closedLots = [];
   const findings = [];
   const lotsOf = (portfolioId, securityId) => {
     const key = `${portfolioId}|${securityId}`;
     return book.get(key) ?? book.set(key, []).get(key);
   };
+  // Share of an inflow left after paying back what is owed on portfolio|security
+  const repay = (portfolioId, securityId, quantity) => {
+    const key = `${portfolioId}|${securityId}`;
+    const paid = Math.min(owed.get(key) ?? 0, quantity);
+    if (paid > 0) owed.set(key, owed.get(key) - paid);
+    return quantity > 0 ? (quantity - paid) / quantity : 0;
+  };
   const openLot = (portfolioId, securityId, date, quantity, costBase, via, lotId) => {
     if (isCashLike(securityId) || quantity <= EPS) return;
+    const kept = repay(portfolioId, securityId, quantity);
+    [quantity, costBase] = [quantity * kept, costBase * kept];
+    if (quantity <= EPS) return;
     lotsOf(portfolioId, securityId).push({
       lot_id: lotId, acquired_date: date, acquired_via: via, quantity,
       orig_value_base: costBase, orig_value_eur: toEur(costBase, portfolios.get(portfolioId).currency, date),
     });
   };
-  // Takes quantity from the newest lots; returns the pieces taken, each with its share of the cost
+  // Part of a lot, with its share of the cost, taken out of it
+  const take = (lot, part) => {
+    const share = part / lot.quantity;
+    const piece = { ...lot, quantity: part, orig_value_base: lot.orig_value_base * share, orig_value_eur: lot.orig_value_eur === null ? null : lot.orig_value_eur * share };
+    lot.quantity -= part;
+    lot.orig_value_base -= piece.orig_value_base;
+    if (lot.orig_value_eur !== null) lot.orig_value_eur -= piece.orig_value_eur;
+    return piece;
+  };
+  // Takes quantity from the lots (LIFO: newest first; AVG: the same share of every lot); returns the pieces taken
   const consume = (portfolioId, securityId, quantity, date, why) => {
     const lots = lotsOf(portfolioId, securityId);
     const taken = [];
     let left = quantity;
+    if (costMethod(securityId) === "AVG") {
+      const held = lots.reduce((total, lot) => total + lot.quantity, 0);
+      const part = Math.min(held, left);
+      if (part > EPS) {
+        for (const lot of lots) taken.push(take(lot, (lot.quantity * part) / held));
+        lots.splice(0, lots.length, ...lots.filter((lot) => lot.quantity > EPS));
+      }
+      left -= part;
+    }
     while (left > EPS && lots.length) {
       const lot = lots.at(-1);
       const part = Math.min(lot.quantity, left);
-      const share = part / lot.quantity;
-      const piece = { ...lot, quantity: part, orig_value_base: lot.orig_value_base * share, orig_value_eur: lot.orig_value_eur === null ? null : lot.orig_value_eur * share };
-      taken.push(piece);
-      lot.quantity -= part;
-      lot.orig_value_base -= piece.orig_value_base;
-      if (lot.orig_value_eur !== null) lot.orig_value_eur -= piece.orig_value_eur;
+      taken.push(take(lot, part));
       if (lot.quantity <= EPS) lots.pop();
       left -= part;
     }
+    if (left > EPS) owed.set(`${portfolioId}|${securityId}`, (owed.get(`${portfolioId}|${securityId}`) ?? 0) + left);
     if (left > 1e-6) findings.push({ type: "SHORT_LOTS", date, portfolio_id: portfolioId, security_id: securityId, missing: left, why });
     return taken;
   };
@@ -195,10 +227,13 @@ export async function computeLots(dateStr) {
           continue;
         }
         const sent = pieces.reduce((total, piece) => total + piece.quantity, 0);
+        const kept = repay(op.portfolio_id, op.security_id, op.quantity);
         for (const piece of pieces) {
           const rate = currencyConverter(portfolio.currency, "EUR", piece.acquired_date);
-          const cost = piece.orig_value_eur === null || !rate ? null : piece.orig_value_eur / rate;
-          const arrived = { ...piece, quantity: (piece.quantity * op.quantity) / sent, orig_value_base: cost };
+          const cost = piece.orig_value_eur === null || !rate ? null : (piece.orig_value_eur * kept) / rate;
+          const arrived = { ...piece, quantity: (piece.quantity * op.quantity * kept) / sent, orig_value_base: cost,
+            orig_value_eur: piece.orig_value_eur === null ? null : piece.orig_value_eur * kept };
+          if (arrived.quantity <= EPS) continue;
           // The same purchase already here (moved out and partly back): one lot
           const same = lotsOf(op.portfolio_id, op.security_id).find((lot) => lot.lot_id === arrived.lot_id);
           if (!same) lotsOf(op.portfolio_id, op.security_id).push(arrived);
@@ -230,30 +265,28 @@ export async function computeLots(dateStr) {
       openLot(op.portfolio_id, received, op.date, receivedQty, op.market_value_base + feeBase, "BUY", `T${op.id}`);
     } else {
       const pieces = consume(op.portfolio_id, given, givenQty, op.date, op.transaction_type);
-      if (isCashLike(received)) {
-        // One closed lot per lot used: sale value and fee split by quantity
-        const year = Number(op.date.slice(0, 4));
-        for (const piece of pieces) {
-          const share = piece.quantity / givenQty;
-          const saleBase = op.market_value_base * share;
-          const feeShare = feeBase * share;
-          const saleEur = toEur(saleBase, portfolio.currency, op.date);
-          const feeEur = toEur(feeShare, portfolio.currency, op.date);
-          closedLots.push({
-            sale_date: op.date, portfolio_id: op.portfolio_id, security_id: given,
-            lot_id: piece.lot_id, acquired_date: piece.acquired_date, acquired_via: piece.acquired_via, quantity: piece.quantity,
-            orig_price: piece.orig_value_base === null ? null : piece.orig_value_base / piece.quantity,
-            orig_value_base: piece.orig_value_base, orig_value_eur: piece.orig_value_eur,
-            sale_price: saleBase / piece.quantity, sale_value_base: saleBase, sale_value_eur: saleEur, sale_fee_base: feeShare,
-            realized_pnl_base: piece.orig_value_base === null ? null : saleBase - feeShare - piece.orig_value_base,
-            realized_pnl_eur: saleEur === null || piece.orig_value_eur === null ? null : saleEur - feeEur - piece.orig_value_eur,
-            realized_return_pct: piece.orig_value_base ? ((saleBase - feeShare - piece.orig_value_base) / piece.orig_value_base) * 100 : null,
-            tax_rate: taxRate(op.portfolio_id, given, year),
-            taxable_gain_eur: saleEur === null || piece.orig_value_eur === null ? null : saleEur - piece.orig_value_eur,
-            sold_for: received, sale_id: `T${op.id}`, source: "ENGINE",
-          });
-        }
-      } else {
+      const sold = pieces.reduce((total, piece) => total + piece.quantity, 0);
+      if (isCashLike(received) && sold > EPS) {
+        // One closed lot per sale: cost = the pieces taken; sale value and fee of what the lots covered
+        const share = sold / givenQty;
+        const saleBase = op.market_value_base * share;
+        const feeShare = feeBase * share;
+        const saleEur = toEur(saleBase, portfolio.currency, op.date);
+        const feeEur = toEur(feeShare, portfolio.currency, op.date);
+        const origBase = sum(pieces, "orig_value_base");
+        const origEur = sum(pieces, "orig_value_eur");
+        closedLots.push({
+          sale_date: op.date, portfolio_id: op.portfolio_id, security_id: given, sale_id: `T${op.id}`, cost_method: costMethod(given), quantity: sold,
+          orig_price: origBase === null ? null : origBase / sold, orig_value_base: origBase, orig_value_eur: origEur,
+          sale_price: saleBase / sold, sale_value_base: saleBase, sale_value_eur: saleEur, sale_fee_base: feeShare,
+          realized_pnl_base: origBase === null ? null : saleBase - feeShare - origBase,
+          realized_pnl_eur: saleEur === null || origEur === null ? null : saleEur - feeEur - origEur,
+          realized_return_pct: origBase ? ((saleBase - feeShare - origBase) / origBase) * 100 : null,
+          tax_rate: taxRate(op.portfolio_id, given, Number(op.date.slice(0, 4))),
+          taxable_gain_eur: saleEur === null || origEur === null ? null : saleEur - origEur,
+          sold_for: received, source: "ENGINE",
+        });
+      } else if (!isCashLike(received)) {
         openLot(op.portfolio_id, received, op.date, receivedQty, sum(pieces, "orig_value_base") + feeBase, "SWAP", `T${op.id}`);
       }
     }
@@ -261,7 +294,7 @@ export async function computeLots(dateStr) {
     if (op.fee && op.fee_currency && !isCashLike(securityFor(op.fee_currency))) consume(op.portfolio_id, securityFor(op.fee_currency), op.fee, op.date, "FEE");
   }
 
-  // Open lots valued at the latest positions on or before dateStr (share of the position by quantity)
+  // One open lot per holding, valued at the latest positions on or before dateStr (share of the position by quantity)
   const { rows: latest } = await query(
     `SELECT DISTINCT ON (p.portfolio_id, p.security_id) p.portfolio_id, p.security_id, p.quantity::float, p.market_value_base::float, p.market_value_eur::float
      FROM positions p JOIN (SELECT portfolio_id, max(date) AS d FROM positions WHERE date <= $1 GROUP BY 1) m
@@ -274,24 +307,28 @@ export async function computeLots(dateStr) {
   const openLots = [];
   for (const [key, lots] of book) {
     const [portfolioId, securityId] = key.split("|");
-    const position = portfolios.get(portfolioId).closed_date ? null : positions.get(key);
-    for (const lot of lots.filter((lot) => lot.quantity > 1e-8)) {
-      const share = position?.quantity ? lot.quantity / position.quantity : null;
-      const currentBase = share === null ? null : position.market_value_base * share;
-      const currentEur = share === null ? null : position.market_value_eur * share;
-      const pnlBase = currentBase === null || lot.orig_value_base === null ? null : currentBase - lot.orig_value_base;
-      const pnlEur = currentEur === null || lot.orig_value_eur === null ? null : currentEur - lot.orig_value_eur;
-      const rate = taxRate(portfolioId, securityId, year);
-      openLots.push({
-        date: dateStr, portfolio_id: portfolioId, security_id: securityId, lot_id: lot.lot_id, acquired_date: lot.acquired_date, acquired_via: lot.acquired_via, quantity: lot.quantity,
-        orig_price: lot.orig_value_base === null ? null : lot.orig_value_base / lot.quantity,
-        orig_value_base: lot.orig_value_base, orig_value_eur: lot.orig_value_eur,
-        current_price: currentBase === null ? null : currentBase / lot.quantity, current_value_base: currentBase, current_value_eur: currentEur,
-        unrealized_pnl_base: pnlBase, unrealized_pnl_eur: pnlEur,
-        unrealized_return_pct: pnlBase === null || !lot.orig_value_base ? null : (pnlBase / lot.orig_value_base) * 100,
-        tax_rate: rate, est_tax_eur: pnlEur === null ? null : (Math.max(pnlEur, 0) * rate) / 100,
-      });
-    }
+    // A closed portfolio holds nothing: what its lots still show is dust (BINANCE_SPOT ETH 0.0002)
+    if (portfolios.get(portfolioId).closed_date) continue;
+    const position = positions.get(key);
+    const quantity = lots.reduce((total, lot) => total + lot.quantity, 0);
+    if (quantity <= 1e-8) continue;
+    const origBase = sum(lots, "orig_value_base");
+    const origEur = sum(lots, "orig_value_eur");
+    const share = position?.quantity ? quantity / position.quantity : null;
+    const currentBase = share === null ? null : position.market_value_base * share;
+    const currentEur = share === null ? null : position.market_value_eur * share;
+    const pnlBase = currentBase === null || origBase === null ? null : currentBase - origBase;
+    const pnlEur = currentEur === null || origEur === null ? null : currentEur - origEur;
+    const rate = taxRate(portfolioId, securityId, year);
+    openLots.push({
+      date: dateStr, portfolio_id: portfolioId, security_id: securityId, cost_method: costMethod(securityId), quantity,
+      orig_price: origBase === null ? null : origBase / quantity, orig_value_base: origBase, orig_value_eur: origEur,
+      current_price: currentBase === null ? null : currentBase / quantity, current_value_base: currentBase, current_value_eur: currentEur,
+      unrealized_pnl_base: pnlBase, unrealized_pnl_eur: pnlEur,
+      unrealized_return_pct: pnlBase === null || !origBase ? null : (pnlBase / origBase) * 100,
+      // The whole holding sold today: the gain net of its losing purchases
+      tax_rate: rate, est_tax_eur: pnlEur === null ? null : (Math.max(pnlEur, 0) * rate) / 100,
+    });
   }
   return { openLots, closedLots, findings, securities, portfolios };
 }
@@ -335,8 +372,8 @@ async function pairTransfers(flows) {
 }
 
 /**
- * Tax items per year (from FIRST_TAX_YEAR) and portfolio, in EUR, from the closed lots (ENGINE + MANUAL, netted per
- * sale_id: the lots of one SELL make one result), the income flows, the navs and the open lots:
+ * Tax items per year (from FIRST_TAX_YEAR) and portfolio, in EUR, from the closed lots (ENGINE + MANUAL, one result
+ * per sale_id), the income flows, the navs and the open lots:
  * - REDDITI_DA_CAPITALE: ETF / FUND gains + classic income (Traditional Investment)
  * - REDDITI_DIVERSI: ETF / FUND losses + every other non-crypto result (no income: GAS added it, but income is
  *   reddito di capitale, art. 44 TUIR)
@@ -367,7 +404,7 @@ export async function computeTaxItems(dateStr, lots) {
   };
   const assetType = (securityId) => securities.get(securityId)?.asset_type;
 
-  // One result per sale (the lots of a SELL together)
+  // One result per sale
   const sales = new Map();
   closedLots.forEach((lot) => {
     const key = `${lot.portfolio_id}|${lot.sale_id}`;
