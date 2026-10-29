@@ -482,12 +482,12 @@ const JUMP_DEFAULT_PCT = 10;
 const MIN_VALUE_CHECKED = 500;
 
 /** Allowed |move| (%) given the moves before it (%, oldest first): JUMP_SIGMAS x their standard deviation. */
-function jumpLimit(previousMoves) {
+function jumpLimit(previousMoves, minPct = JUMP_MIN_PCT) {
   const moves = previousMoves.slice(-JUMP_LOOKBACK);
-  if (moves.length < JUMP_MIN_HISTORY) return { limit: JUMP_DEFAULT_PCT, sigma: null };
+  if (moves.length < JUMP_MIN_HISTORY) return { limit: Math.max(JUMP_DEFAULT_PCT, minPct), sigma: null };
   const mean = moves.reduce((sum, move) => sum + move, 0) / moves.length;
   const sigma = Math.sqrt(moves.reduce((sum, move) => sum + (move - mean) ** 2, 0) / (moves.length - 1));
-  return { limit: Math.max(JUMP_SIGMAS * sigma, JUMP_MIN_PCT), sigma };
+  return { limit: Math.max(JUMP_SIGMAS * sigma, minPct), sigma };
 }
 
 /** Result in the shape every check returns (rows = what failed, capped for the email). */
@@ -1200,6 +1200,143 @@ export async function checkPortfoliosInTree(targetDate = new Date()) {
   });
 }
 
+// ============================================================================
+// PERFORMANCE (user, 2026-10-29)
+// ============================================================================
+// Residual: what positions / navs don't explain, in % of the brick (WARNING above, CRITICAL above the second);
+// portfolios below MIN_VALUE_CHECKED_PERF at the brick start are skipped (IBKR's last 5 EUR)
+const RESIDUAL_WARN_PCT = 0.5;
+const RESIDUAL_FAIL_PCT = 2;
+const MIN_VALUE_CHECKED_PERF = 100;
+// Daily return jumps: 3σ of the series' last 90 bricks like the nav jumps, never below these floors
+const PERF_JUMP_MIN_PCT = { portfolio: 5, aggregate: 2 };
+// A trade booked far from the close (wrong price / quantity) shows as trade return
+const TRADE_SPIKE_PCT = 2;
+
+/** PF1: portfolio / aggregate bricks written today whose residual is beyond RESIDUAL_WARN_PCT. */
+export async function checkPerformanceResiduals(targetDate = new Date()) {
+  const dateStr = utils.formatDateToISO(targetDate);
+  const { rows } = await query(
+    `SELECT 'portfolio' AS level, b.portfolio_id AS id, b.start_date::text, b.end_date::text, round(b.total_return::numeric, 3)::float AS total_pct,
+            round(b.residual::numeric, 3)::float AS residual_pct, round(n.nav::numeric, 2)::float AS start_nav
+     FROM portfolio_performance b JOIN nav n ON n.portfolio_id = b.portfolio_id AND n.date = b.start_date
+     WHERE b.created_at >= $1::date AND abs(b.residual) > $2 AND abs(n.nav) >= $3
+     UNION ALL
+     SELECT 'aggregate', a.aggregate_id, a.start_date::text, a.end_date::text, round(a.total_return::numeric, 3)::float, round(a.residual::numeric, 3)::float, NULL
+     FROM aggregate_performance a WHERE a.created_at >= $1::date AND abs(a.residual) > $2
+     ORDER BY 6 DESC LIMIT 200;`,
+    [dateStr, RESIDUAL_WARN_PCT, MIN_VALUE_CHECKED_PERF],
+  );
+  return qcResult("checkPerformanceResiduals", dateStr, rows, {
+    severity: rows.some((row) => Math.abs(row.residual_pct) > RESIDUAL_FAIL_PCT) ? "CRITICAL" : "WARNING",
+    ok: `No performance residual above ${RESIDUAL_WARN_PCT}%.`,
+    fail: (n) => `${n} performance brick(s) with a residual above ${RESIDUAL_WARN_PCT}%.`,
+    message: `Returns the positions / navs don't explain (positions vs ledger, nav vs positions); above ${RESIDUAL_FAIL_PCT}% is critical:`,
+  });
+}
+
+/** PF2: every nav of a performance portfolio after its first one ends a performance brick. */
+export async function checkPerformanceCoverage(targetDate = new Date()) {
+  const dateStr = utils.formatDateToISO(targetDate);
+  const { rows } = await query(
+    `SELECT n.portfolio_id, count(*)::int AS navs_without_brick, min(n.date)::text AS first, max(n.date)::text AS last
+     FROM nav n JOIN portfolios p USING (portfolio_id)
+     WHERE p.performance AND n.date <= $1::date AND n.date > (SELECT min(date) FROM nav f WHERE f.portfolio_id = n.portfolio_id)
+       AND NOT EXISTS (SELECT 1 FROM portfolio_performance b WHERE b.portfolio_id = n.portfolio_id AND b.end_date = n.date)
+     GROUP BY 1 ORDER BY 1;`,
+    [dateStr],
+  );
+  return qcResult("checkPerformanceCoverage", dateStr, rows, {
+    severity: "CRITICAL",
+    ok: "Every nav of the performance portfolios has its performance brick.",
+    fail: (n) => `${n} performance portfolio(s) with navs and no performance.`,
+    message: "Navs with no performance brick (the aggregates would count these days as 0%):",
+  });
+}
+
+/**
+ * PF3: daily returns in the last 7 days beyond 3σ of the same series' previous 90 bricks (portfolio / aggregate),
+ * floors PERF_JUMP_MIN_PCT; portfolios below MIN_VALUE_CHECKED at the brick start are skipped.
+ */
+export async function checkPerformanceJumps(targetDate = new Date()) {
+  const dateStr = utils.formatDateToISO(targetDate);
+  const lookbackDays = Math.ceil(JUMP_LOOKBACK * 1.5) + 7;
+  const { rows: bricks } = await query(
+    `SELECT 'portfolio' AS level, b.portfolio_id AS id, b.end_date::text, b.total_return::float AS pct, n.nav::float AS start_nav
+     FROM portfolio_performance b JOIN nav n ON n.portfolio_id = b.portfolio_id AND n.date = b.start_date
+     WHERE b.end_date > $1::date - $2::int AND b.end_date <= $1::date
+     UNION ALL
+     SELECT 'aggregate', aggregate_id, end_date::text, total_return::float, NULL FROM aggregate_performance
+     WHERE end_date > $1::date - $2::int AND end_date <= $1::date
+     ORDER BY 1, 2, 3;`,
+    [dateStr, lookbackDays],
+  );
+  const recentFrom = utils.addDays(dateStr, -6);
+  const bySeries = new Map();
+  for (const brick of bricks) (bySeries.get(`${brick.level}|${brick.id}`) ?? bySeries.set(`${brick.level}|${brick.id}`, []).get(`${brick.level}|${brick.id}`)).push(brick);
+  const rows = [];
+  for (const series of bySeries.values()) {
+    const pcts = series.map((brick) => brick.pct);
+    series.forEach((brick, index) => {
+      if (brick.end_date < recentFrom || (brick.level === "portfolio" && Math.abs(brick.start_nav) < MIN_VALUE_CHECKED)) return;
+      const { limit, sigma } = jumpLimit(pcts.slice(0, index), PERF_JUMP_MIN_PCT[brick.level]);
+      if (Math.abs(brick.pct) > limit)
+        rows.push({ level: brick.level, id: brick.id, end_date: brick.end_date, return_pct: round(brick.pct), sigma_pct: round(sigma), limit_pct: round(limit) });
+    });
+  }
+  return qcResult("checkPerformanceJumps", dateStr, rows, {
+    severity: "WARNING",
+    failureType: "PROBABILISTIC",
+    ok: "No unusual daily return in the last 7 days.",
+    fail: (n) => `Found ${n} unusual daily return(s).`,
+    message: "Returns beyond 3σ of their last 90 days (a wrong price or fx rate? money in / out is already removed):",
+  });
+}
+
+/** PF4: portfolio bricks written today with a trade return beyond TRADE_SPIKE_PCT (a trade far from the close). */
+export async function checkTradeSpikes(targetDate = new Date()) {
+  const dateStr = utils.formatDateToISO(targetDate);
+  const { rows } = await query(
+    `SELECT portfolio_id, start_date::text, end_date::text, round(trade_return::numeric, 3)::float AS trade_pct, round(total_return::numeric, 3)::float AS total_pct
+     FROM portfolio_performance WHERE created_at >= $1::date AND abs(trade_return) > $2 ORDER BY abs(trade_return) DESC;`,
+    [dateStr, TRADE_SPIKE_PCT],
+  );
+  return qcResult("checkTradeSpikes", dateStr, rows, {
+    severity: "WARNING",
+    ok: `No trade return above ${TRADE_SPIKE_PCT}%.`,
+    fail: (n) => `${n} brick(s) with a trade return above ${TRADE_SPIKE_PCT}%.`,
+    message: "Trades booked far from the closing price (a wrong price or quantity in the ledger?):",
+  });
+}
+
+/**
+ * PF5: performance ran: every performance portfolio's last brick ends on its last nav, and every aggregate with a
+ * brick in the 7 days before has one ending today.
+ */
+export async function hasPerformanceRunToday(targetDate = new Date()) {
+  const dateStr = utils.formatDateToISO(targetDate);
+  const { rows } = await query(
+    `SELECT 'portfolio' AS level, p.portfolio_id AS id, (SELECT max(date) FROM nav n WHERE n.portfolio_id = p.portfolio_id AND n.date <= $1::date)::text AS last_nav,
+            (SELECT max(end_date) FROM portfolio_performance b WHERE b.portfolio_id = p.portfolio_id)::text AS last_brick
+     FROM portfolios p WHERE p.performance
+       AND (SELECT max(date) FROM nav n WHERE n.portfolio_id = p.portfolio_id AND n.date <= $1::date) > (SELECT min(date) FROM nav n WHERE n.portfolio_id = p.portfolio_id)
+       AND coalesce((SELECT max(end_date) FROM portfolio_performance b WHERE b.portfolio_id = p.portfolio_id), '1900-01-01')
+           < (SELECT max(date) FROM nav n WHERE n.portfolio_id = p.portfolio_id AND n.date <= $1::date)
+     UNION ALL
+     SELECT 'aggregate', a.aggregate_id, NULL, max(a.end_date)::text FROM aggregate_performance a
+     WHERE a.end_date >= $1::date - 7 AND a.end_date < $1::date
+       AND NOT EXISTS (SELECT 1 FROM aggregate_performance t WHERE t.aggregate_id = a.aggregate_id AND t.end_date = $1::date)
+     GROUP BY a.aggregate_id ORDER BY 1, 2;`,
+    [dateStr],
+  );
+  return qcResult("hasPerformanceRunToday", dateStr, rows, {
+    severity: "CRITICAL",
+    ok: "Performance is up to date for every portfolio and aggregate.",
+    fail: (n) => `${n} portfolio(s) / aggregate(s) with performance behind their navs.`,
+    message: "Performance not computed up to the latest nav (did the performance step fail?):",
+  });
+}
+
 export const overnightQC = {
   hasCryptoRunToday,
   hasFxRunToday,
@@ -1229,6 +1366,11 @@ export const overnightQC = {
   checkAggregateJumps,
   isAggregateNavContinuous,
   checkPortfoliosInTree,
+  checkPerformanceResiduals,
+  checkPerformanceCoverage,
+  checkPerformanceJumps,
+  checkTradeSpikes,
+  hasPerformanceRunToday,
   runAll,
 };
 
@@ -1267,6 +1409,12 @@ async function runAll(targetDate = new Date()) {
     checkAggregateJumps(targetDate),
     isAggregateNavContinuous(targetDate),
     checkPortfoliosInTree(targetDate),
+    // performance
+    hasPerformanceRunToday(targetDate),
+    checkPerformanceCoverage(targetDate),
+    checkPerformanceResiduals(targetDate),
+    checkPerformanceJumps(targetDate),
+    checkTradeSpikes(targetDate),
   ]);
 
   return { results };
