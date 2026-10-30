@@ -1,22 +1,50 @@
 import nodemailer from "nodemailer";
 import { config } from "../config.js";
 
-// src/reports/qcEmailReporter.js
-
-const NORD = {
-  polarNight0: "#2E3440", // Deep background
-  polarNight1: "#3B4252", // Card background
-  polarNight2: "#434C5E", // Row hover / borders
-  polarNight3: "#4C566A", // Muted text / dividers
-  snowStorm0: "#D8DEE9", // Secondary text
-  snowStorm1: "#E5E9F0", // Body text
-  snowStorm2: "#ECEFF4", // Crisp white headers
-  frost2: "#88C0D0", // Accent cyan
-  auroraGreen: "#A3BE8C", // Pass
-  auroraYellow: "#EBCB8B", // Probabilistic Warning
-  auroraOrange: "#D08770", // Deterministic Warning / Badges
-  auroraRed: "#BF616A", // Critical Failure
+// Material Design 3 baseline light scheme (seed #6750A4, the purple of the M3 guidelines; user), shared by every email.
+// M3 has no success / warning roles: they are Theme Builder custom colors (4 roles each, tones 40 / 100 / 90 / 10 of
+// their palette, generated with @material/material-color-utilities): success = green #2E7D32 harmonized to the seed;
+// warning = amber #FBC02D NOT harmonized (harmonized it turns orange, too close to the error container).
+export const M3 = {
+  primary: "#6750A4",
+  onPrimary: "#FFFFFF",
+  primaryContainer: "#EADDFF",
+  onPrimaryContainer: "#21005D",
+  secondaryContainer: "#E8DEF8",
+  onSecondaryContainer: "#1D192B",
+  surface: "#FEF7FF",
+  surfaceContainerLowest: "#FFFFFF",
+  surfaceContainerLow: "#F7F2FA",
+  surfaceContainer: "#F3EDF7",
+  surfaceContainerHigh: "#ECE6F0",
+  onSurface: "#1D1B20",
+  onSurfaceVariant: "#49454F",
+  outline: "#79747E",
+  outlineVariant: "#CAC4D0",
+  error: "#B3261E",
+  onError: "#FFFFFF",
+  errorContainer: "#F9DEDC",
+  onErrorContainer: "#410E0B",
+  success: "#006D43",
+  onSuccess: "#FFFFFF",
+  successContainer: "#92F7BC",
+  onSuccessContainer: "#002111",
+  warning: "#795900",
+  onWarning: "#FFFFFF",
+  warningContainer: "#FFDFA0",
+  onWarningContainer: "#261A00",
 };
+export const M3_FONT = "Roboto, 'Google Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif";
+
+// Status colors: FAIL = error, WARN = warning, PASS = success (container + on-container: M3 tonal chips)
+const STATUS = {
+  FAIL: { bg: M3.errorContainer, fg: M3.onErrorContainer, accent: M3.error },
+  WARN: { bg: M3.warningContainer, fg: M3.onWarningContainer, accent: M3.warning },
+  PASS: { bg: M3.successContainer, fg: M3.onSuccessContainer, accent: M3.success },
+};
+const statusOf = (c) => (c.passed ? "PASS" : c.severity === "CRITICAL" ? "FAIL" : "WARN");
+const chip = (text, { bg, fg }) =>
+  `<span style="display: inline-block; padding: 4px 10px; border-radius: 8px; background-color: ${bg}; color: ${fg}; font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: 0.5px; white-space: nowrap;">${text}</span>`;
 
 export function buildQcEmailHtml(qcResults, targetDate = new Date()) {
   const dateStr =
@@ -27,106 +55,92 @@ export function buildQcEmailHtml(qcResults, targetDate = new Date()) {
 
   const passedCount = checks.filter((c) => c.passed).length;
   const failedChecks = checks.filter((c) => !c.passed);
-  const criticalCount = checks.filter(
-    (c) => !c.passed && c.severity === "CRITICAL",
-  ).length;
-  const warningCount = checks.filter(
-    (c) => !c.passed && c.severity === "WARNING",
-  ).length;
-
-  const criticalFailures = checks.filter(
-    (c) => !c.passed && c.severity === "CRITICAL",
-  );
-  const warningFailures = checks.filter(
-    (c) => !c.passed && c.severity === "WARNING",
-  );
+  const criticalFailures = failedChecks.filter((c) => c.severity === "CRITICAL");
+  const warningFailures = failedChecks.filter((c) => c.severity !== "CRITICAL");
+  const criticalCount = criticalFailures.length;
+  const warningCount = warningFailures.length;
 
   // Warnings (probabilistic checks: price / fx / nav jumps) don't fail the night: only a critical does (user)
   const overall =
     criticalCount > 0
-      ? { label: "CRITICAL ALERT", color: NORD.auroraRed }
-      : { label: warningCount > 0 ? `PASS · ${warningCount} warning${warningCount > 1 ? "s" : ""}` : "PASS", color: NORD.auroraGreen };
+      ? { label: "CRITICAL ALERT", bg: M3.error, fg: M3.onError }
+      : warningCount > 0
+        ? { label: `PASS &middot; ${warningCount} warning${warningCount > 1 ? "s" : ""}`, bg: M3.warningContainer, fg: M3.onWarningContainer }
+        : { label: "PASS", bg: M3.successContainer, fg: M3.onSuccessContainer };
 
-  // Email-client rules: Gmail drops <body> styles, so the dark background lives on a full-width outer table
-  // (bgcolor + style); the card is a fluid table capped at 640px. Phones: viewport meta + @media rules (supported by
-  // Gmail / Apple Mail) stack the header, hide secondary columns and let wide data tables scroll.
+  // Email-client rules: Gmail drops <body> styles, so the background lives on a full-width outer table (bgcolor +
+  // style); the card is a fluid table capped at 640px. Phones: viewport meta + @media rules (Gmail / Apple Mail) stack
+  // the header and the KPI cards, hide secondary columns and let wide data tables scroll.
   return `
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="color-scheme" content="dark">
-  <meta name="supported-color-schemes" content="dark">
+  <meta name="color-scheme" content="light">
+  <meta name="supported-color-schemes" content="light">
   <title>FinDB Overnight QC Report - ${dateStr}</title>
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500&display=swap" rel="stylesheet">
   <style>
-    body { margin: 0 !important; padding: 0 !important; background-color: ${NORD.polarNight0}; }
+    body { margin: 0 !important; padding: 0 !important; background-color: ${M3.surface}; }
     @media only screen and (max-width: 600px) {
       .outer-pad { padding: 12px 8px !important; }
       .section { padding-left: 16px !important; padding-right: 16px !important; }
-      .stack { display: block !important; width: 100% !important; text-align: left !important; }
-      .stack-gap { padding-top: 10px !important; }
+      .stack { display: block !important; width: 100% !important; text-align: left !important; padding: 0 !important; }
+      .stack-gap { padding-top: 12px !important; }
+      .kpi-value { font-size: 22px !important; line-height: 28px !important; }
       .hide-mobile { display: none !important; }
       .show-mobile { display: block !important; max-height: none !important; overflow: visible !important; }
-      .kpi-label { font-size: 11px !important; }
-      .kpi-value { font-size: 22px !important; }
-      .title { font-size: 19px !important; }
     }
   </style>
 </head>
-<body style="margin: 0; padding: 0; background-color: ${NORD.polarNight0};">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${NORD.polarNight0}" style="background-color: ${NORD.polarNight0}; width: 100%;">
+<body style="margin: 0; padding: 0; background-color: ${M3.surface};">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${M3.surface}" style="background-color: ${M3.surface}; width: 100%;">
     <tr>
       <td class="outer-pad" align="center" style="padding: 24px 12px;">
-        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${NORD.polarNight1}" style="width: 100%; max-width: 640px; background-color: ${NORD.polarNight1}; border: 1px solid ${NORD.polarNight2}; border-radius: 8px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: ${NORD.snowStorm1};">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${M3.surfaceContainerLow}" style="width: 100%; max-width: 640px; table-layout: fixed; background-color: ${M3.surfaceContainerLow}; border-radius: 28px; font-family: ${M3_FONT}; color: ${M3.onSurface};">
 
-          <!-- HEADER -->
+          <!-- TOP APP BAR -->
           <tr>
-            <td class="section" style="padding: 22px 28px; border-bottom: 2px solid ${NORD.frost2};">
+            <td class="section" style="padding: 24px 24px 8px 24px;">
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
                 <tr>
                   <td class="stack" valign="middle">
-                    <div class="title" style="font-size: 20px; font-weight: 700; color: ${NORD.snowStorm2}; letter-spacing: 0.4px;">FINDB OVERNIGHT QC</div>
-                    <div style="font-size: 14px; color: ${NORD.frost2}; margin-top: 4px; font-weight: 500;">Valuation date ${dateStr}</div>
+                    <div style="font-size: 22px; line-height: 28px; font-weight: 400; color: ${M3.onSurface};">Overnight QC</div>
+                    <div style="font-size: 14px; line-height: 20px; letter-spacing: 0.25px; color: ${M3.onSurfaceVariant}; margin-top: 2px;">Valuation date ${dateStr}</div>
                   </td>
                   <td class="stack stack-gap" valign="middle" align="right" style="text-align: right;">
-                    <span style="display: inline-block; padding: 7px 12px; border-radius: 4px; font-size: 13px; font-weight: 700; background-color: ${overall.color}; color: ${NORD.polarNight0}; letter-spacing: 0.4px;">${overall.label}</span>
+                    <span style="display: inline-block; padding: 8px 16px; border-radius: 8px; background-color: ${overall.bg}; color: ${overall.fg}; font-size: 14px; line-height: 20px; font-weight: 500; letter-spacing: 0.1px; white-space: nowrap;">${overall.label}</span>
                   </td>
                 </tr>
               </table>
             </td>
           </tr>
 
-          <!-- KPI STRIP -->
+          <!-- KPI CARDS -->
           <tr>
-            <td class="section" bgcolor="${NORD.polarNight0}" style="padding: 16px 28px; background-color: ${NORD.polarNight0}; border-bottom: 1px solid ${NORD.polarNight2};">
+            <td class="section" style="padding: 16px 24px 8px 24px;">
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
                 <tr>
-                  ${renderKpi("Passed", `${passedCount}/${checks.length}`, NORD.auroraGreen, true)}
-                  ${renderKpi("Critical", criticalCount, criticalCount > 0 ? NORD.auroraRed : NORD.snowStorm0, true)}
-                  ${renderKpi("Warnings", warningCount, warningCount > 0 ? NORD.auroraOrange : NORD.snowStorm0, false)}
+                  ${renderKpi("Passed", `${passedCount}/${checks.length}`, STATUS.PASS, "right")}
+                  ${renderKpi("Critical", criticalCount, criticalCount > 0 ? STATUS.FAIL : null, "both")}
+                  ${renderKpi("Warnings", warningCount, warningCount > 0 ? STATUS.WARN : null, "left")}
                 </tr>
               </table>
             </td>
           </tr>
 
-          <!-- SUMMARY: only the checks that failed or warned (the KPI strip above counts them all) -->
+          <!-- CHECKS: only the ones that failed or warned (the KPI cards count them all) -->
           <tr>
-            <td class="section" style="padding: 22px 28px;">
-              <div style="margin: 0 0 12px 0; font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: ${NORD.snowStorm2};">Checks</div>
+            <td class="section" style="padding: 16px 24px;">
+              <div style="margin: 0 0 12px 4px; font-size: 14px; line-height: 20px; font-weight: 500; letter-spacing: 0.1px; color: ${M3.primary};">Checks</div>
               ${
                 failedChecks.length === 0
-                  ? `<div style="font-size: 14px; color: ${NORD.auroraGreen};">All ${checks.length} checks passed.</div>`
-                  : `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse: collapse; font-size: 14px;">
-                <tr style="text-align: left; color: ${NORD.snowStorm0};">
-                  <th align="left" style="padding: 8px 10px; font-weight: 600; font-size: 12px; border-bottom: 1px solid ${NORD.polarNight3};">Check</th>
-                  <th class="hide-mobile" align="left" style="padding: 8px 10px; font-weight: 600; font-size: 12px; border-bottom: 1px solid ${NORD.polarNight3};">Type</th>
-                  <th class="hide-mobile" align="left" style="padding: 8px 10px; font-weight: 600; font-size: 12px; border-bottom: 1px solid ${NORD.polarNight3};">Severity</th>
-                  <th align="right" style="padding: 8px 10px; font-weight: 600; font-size: 12px; border-bottom: 1px solid ${NORD.polarNight3};">Status</th>
-                </tr>
-                ${failedChecks.map((c, idx) => renderSummaryRow(c, idx)).join("")}
+                  ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${M3.successContainer}" style="background-color: ${M3.successContainer}; border-radius: 16px;"><tr><td style="padding: 16px 20px; font-size: 14px; line-height: 20px; color: ${M3.onSuccessContainer};">All ${checks.length} checks passed.</td></tr></table>`
+                  : `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${M3.surfaceContainerLowest}" style="background-color: ${M3.surfaceContainerLowest}; border-radius: 16px; border-collapse: separate; font-size: 14px;">
+                ${failedChecks.map((c, idx) => renderSummaryRow(c, idx === failedChecks.length - 1)).join("")}
               </table>
-              <div style="margin-top: 10px; font-size: 12px; color: ${NORD.snowStorm0};">${passedCount} other check(s) passed.</div>`
+              <div style="margin: 10px 0 0 4px; font-size: 12px; line-height: 16px; letter-spacing: 0.4px; color: ${M3.onSurfaceVariant};">${passedCount} other check(s) passed.</div>`
               }
             </td>
           </tr>
@@ -134,21 +148,12 @@ export function buildQcEmailHtml(qcResults, targetDate = new Date()) {
           ${
             criticalFailures.length > 0 || warningFailures.length > 0
               ? `
-          <!-- FAILURES -->
+          <!-- DETAILS -->
           <tr>
-            <td class="section" style="padding: 4px 28px 28px 28px;">
-              ${
-                criticalFailures.length > 0
-                  ? `<div style="margin: 16px 0 12px 0; font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: ${NORD.auroraRed};">🚨 Critical failures</div>
-              ${criticalFailures.map((c) => renderDetailCard(c, NORD.auroraRed)).join("")}`
-                  : ""
-              }
-              ${
-                warningFailures.length > 0
-                  ? `<div style="margin: 16px 0 12px 0; font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: ${NORD.auroraOrange};">⚠️ Warnings</div>
-              ${warningFailures.map((c) => renderDetailCard(c, NORD.auroraOrange)).join("")}`
-                  : ""
-              }
+            <td class="section" style="padding: 8px 24px 16px 24px;">
+              <div style="margin: 0 0 12px 4px; font-size: 14px; line-height: 20px; font-weight: 500; letter-spacing: 0.1px; color: ${M3.primary};">Details</div>
+              ${criticalFailures.map((c) => renderDetailCard(c, STATUS.FAIL, "FAIL")).join("")}
+              ${warningFailures.map((c) => renderDetailCard(c, STATUS.WARN, "WARN")).join("")}
             </td>
           </tr>`
               : ""
@@ -156,7 +161,7 @@ export function buildQcEmailHtml(qcResults, targetDate = new Date()) {
 
           <!-- FOOTER -->
           <tr>
-            <td class="section" bgcolor="${NORD.polarNight0}" style="padding: 14px 28px; background-color: ${NORD.polarNight0}; border-top: 1px solid ${NORD.polarNight2}; border-radius: 0 0 8px 8px; font-size: 12px; color: ${NORD.polarNight3}; text-align: center;">
+            <td class="section" style="padding: 16px 24px 24px 24px; border-top: 1px solid ${M3.outlineVariant}; font-size: 12px; line-height: 16px; letter-spacing: 0.4px; color: ${M3.outline}; text-align: center;">
               findb-engine &bull; daily batch &bull; Postgres
             </td>
           </tr>
@@ -170,72 +175,59 @@ export function buildQcEmailHtml(qcResults, targetDate = new Date()) {
   `.trim();
 }
 
-/** One KPI cell (label above, big value below), with a divider on its right unless it is the last. */
-function renderKpi(label, value, color, divider) {
+/** One KPI card (label above, big value below): tonal status container, or neutral when the count is 0. */
+function renderKpi(label, value, status, gap) {
+  const bg = status ? status.bg : M3.surfaceContainerHigh;
+  const fg = status ? status.fg : M3.onSurfaceVariant;
+  const padding = { right: "0 4px 0 0", both: "0 4px", left: "0 0 0 4px" }[gap];
   return `
-                  <td width="33%" align="center" valign="top" style="text-align: center; padding: 2px 4px;${divider ? ` border-right: 1px solid ${NORD.polarNight2};` : ""}">
-                    <div class="kpi-label" style="font-size: 12px; text-transform: uppercase; color: ${NORD.snowStorm0}; font-weight: 600; letter-spacing: 0.4px;">${label}</div>
-                    <div class="kpi-value" style="font-size: 24px; font-weight: 700; color: ${color}; margin-top: 4px;">${value}</div>
+                  <td width="33%" valign="top" style="padding: ${padding};">
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${bg}" style="background-color: ${bg}; border-radius: 16px;">
+                      <tr><td style="padding: 14px 16px;">
+                        <div style="font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: 0.5px; color: ${fg};">${label}</div>
+                        <div class="kpi-value" style="font-size: 28px; line-height: 36px; font-weight: 400; color: ${fg}; margin-top: 4px;">${value}</div>
+                      </td></tr>
+                    </table>
                   </td>`;
 }
 
-function renderSummaryRow(c, idx) {
-  const isAlt = idx % 2 === 1;
-  const bg = isAlt ? `background-color: rgba(255, 255, 255, 0.02);` : "";
-
-  let badge;
-  if (c.passed) {
-    badge = `<span style="background-color: ${NORD.auroraGreen}; color: ${NORD.polarNight0}; padding: 4px 9px; border-radius: 4px; font-weight: 700; font-size: 12px; white-space: nowrap;">PASS</span>`;
-  } else if (c.severity === "CRITICAL") {
-    badge = `<span style="background-color: ${NORD.auroraRed}; color: ${NORD.snowStorm2}; padding: 4px 9px; border-radius: 4px; font-weight: 700; font-size: 12px; white-space: nowrap;">FAIL</span>`;
-  } else {
-    badge = `<span style="background-color: ${NORD.auroraOrange}; color: ${NORD.snowStorm2}; padding: 4px 9px; border-radius: 4px; font-weight: 700; font-size: 12px; white-space: nowrap;">WARN</span>`;
-  }
-
-  const failureTypeColor =
-    c.failureType === "DETERMINISTIC" ? NORD.frost2 : NORD.auroraYellow;
-
-  const severityColor = c.severity === "CRITICAL" ? NORD.auroraRed : NORD.snowStorm0;
-  const cell = `padding: 11px 10px; border-bottom: 1px solid ${NORD.polarNight2}; ${bg}`;
+function renderSummaryRow(c, last) {
+  const status = statusOf(c);
+  const type = c.failureType || "DETERMINISTIC";
+  const severity = c.severity || "WARNING";
+  const meta = `${type.charAt(0)}${type.slice(1).toLowerCase()} &middot; ${severity.charAt(0)}${severity.slice(1).toLowerCase()}`;
+  const cell = `padding: 14px 16px;${last ? "" : ` border-bottom: 1px solid ${M3.outlineVariant};`}`;
   return `
                 <tr>
                   <td valign="top" style="${cell}">
-                    <div style="font-weight: 600; color: ${NORD.snowStorm2}; font-size: 14px;">${c.check}</div>
-                    ${c.summary ? `<div style="font-size: 12px; color: ${NORD.snowStorm0}; margin-top: 3px;">${c.summary}</div>` : ""}
-                    <div class="show-mobile" style="display: none; max-height: 0; overflow: hidden; font-size: 11px; font-weight: 600; margin-top: 4px;">
-                      <span style="color: ${failureTypeColor};">${c.failureType || "DETERMINISTIC"}</span>
-                      <span style="color: ${NORD.polarNight3};"> &bull; </span>
-                      <span style="color: ${severityColor};">${c.severity || "WARNING"}</span>
-                    </div>
+                    <div style="font-size: 14px; line-height: 20px; font-weight: 500; letter-spacing: 0.1px; color: ${M3.onSurface};">${c.check}</div>
+                    ${c.summary ? `<div style="font-size: 14px; line-height: 20px; letter-spacing: 0.25px; color: ${M3.onSurfaceVariant}; margin-top: 2px;">${c.summary}</div>` : ""}
+                    <div style="font-size: 12px; line-height: 16px; letter-spacing: 0.4px; color: ${M3.outline}; margin-top: 4px;">${meta}</div>
                   </td>
-                  <td class="hide-mobile" valign="top" style="${cell} font-size: 12px; font-weight: 600; color: ${failureTypeColor};">${c.failureType || "DETERMINISTIC"}</td>
-                  <td class="hide-mobile" valign="top" style="${cell} font-size: 12px; font-weight: 600; color: ${severityColor};">${c.severity || "WARNING"}</td>
-                  <td valign="top" align="right" style="${cell} text-align: right;">${badge}</td>
+                  <td valign="top" align="right" style="${cell} text-align: right;">${chip(status, STATUS[status])}</td>
                 </tr>
   `;
 }
 
-function renderDetailCard(c, accentColor) {
+function renderDetailCard(c, status, label) {
   return `
-    <div style="margin-bottom: 14px; background-color: ${NORD.polarNight0}; border: 1px solid ${NORD.polarNight2}; border-left: 4px solid ${accentColor}; border-radius: 4px; padding: 14px;">
-      <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom: 8px;">
-        <tr>
-          <td>
-            <span style="font-weight: 700; color: ${NORD.snowStorm2}; font-size: 14px;">${c.check}</span>
-            <span style="margin-left: 8px; font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 3px; background-color: ${NORD.polarNight2}; color: ${NORD.snowStorm1};">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${M3.surfaceContainerLowest}" style="margin-bottom: 12px; table-layout: fixed; background-color: ${M3.surfaceContainerLowest}; border-radius: 16px;">
+      <tr><td style="padding: 16px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom: 8px;">
+          <tr>
+            <td valign="middle">
+              ${chip(label, status)}
+              <span style="margin-left: 8px; font-size: 16px; line-height: 24px; font-weight: 500; letter-spacing: 0.15px; color: ${M3.onSurface};">${c.check}</span>
+            </td>
+            <td class="hide-mobile" align="right" valign="middle" style="font-size: 12px; line-height: 16px; letter-spacing: 0.4px; color: ${M3.onSurfaceVariant}; white-space: nowrap;">
               ${c.failureType || "DETERMINISTIC"}
-            </span>
-          </td>
-          <td align="right" style="font-size: 11px; color: ${NORD.snowStorm0};">
-            ${c.date || ""}
-          </td>
-        </tr>
-      </table>
-      
-      ${c.message ? `<div style="font-size: 13px; line-height: 1.45; color: ${NORD.snowStorm1}; margin-bottom: 12px;">${c.message}</div>` : ""}
-
-      ${renderDynamicData(c.data)}
-    </div>
+            </td>
+          </tr>
+        </table>
+        ${c.message ? `<div style="font-size: 14px; line-height: 20px; letter-spacing: 0.25px; color: ${M3.onSurfaceVariant}; margin-bottom: 12px;">${c.message}</div>` : ""}
+        ${renderDynamicData(c.data)}
+      </td></tr>
+    </table>
   `;
 }
 
@@ -253,19 +245,19 @@ function renderDynamicData(data) {
 
     // Wide data tables scroll sideways on phones instead of shrinking the whole email
     return `
-      <div style="width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; margin-top: 8px;">
-      <table cellpadding="6" cellspacing="0" style="border-collapse: collapse; font-size: 12px; background-color: ${NORD.polarNight1}; min-width: 100%;">
+      <div style="width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; margin-top: 8px; border: 1px solid ${M3.outlineVariant}; border-radius: 12px;">
+      <table cellpadding="6" cellspacing="0" style="border-collapse: collapse; font-size: 12px; min-width: 100%;">
         <thead>
-          <tr style="background-color: ${NORD.polarNight2}; text-align: left; color: ${NORD.snowStorm2};">
-            ${columns.map((col) => `<th style="padding: 6px 10px; font-weight: 600; text-transform: uppercase; white-space: nowrap; text-align: left;">${col}</th>`).join("")}
+          <tr style="background-color: ${M3.surfaceContainer}; text-align: left; color: ${M3.onSurfaceVariant};">
+            ${columns.map((col) => `<th style="padding: 8px 12px; font-weight: 500; letter-spacing: 0.5px; white-space: nowrap; text-align: left;">${col}</th>`).join("")}
           </tr>
         </thead>
         <tbody>
           ${displayRows
             .map(
-              (row, idx) => `
-            <tr style="border-bottom: 1px solid ${NORD.polarNight2}; background-color: ${idx % 2 === 1 ? "rgba(255,255,255,0.02)" : "transparent"}; color: ${NORD.snowStorm1};">
-              ${columns.map((col) => `<td style="padding: 6px 10px; font-family: monospace; white-space: nowrap;">${row[col] !== null && row[col] !== undefined ? row[col] : ""}</td>`).join("")}
+              (row) => `
+            <tr style="border-top: 1px solid ${M3.outlineVariant}; color: ${M3.onSurface};">
+              ${columns.map((col) => `<td style="padding: 8px 12px; font-family: 'Roboto Mono', monospace; white-space: nowrap;">${row[col] !== null && row[col] !== undefined ? row[col] : ""}</td>`).join("")}
             </tr>
           `,
             )
@@ -273,8 +265,8 @@ function renderDynamicData(data) {
           ${
             isTruncated
               ? `
-            <tr style="background-color: ${NORD.polarNight0}; font-style: italic; color: ${NORD.snowStorm0};">
-              <td colspan="${columns.length}" style="padding: 8px 10px; text-align: center;">
+            <tr style="border-top: 1px solid ${M3.outlineVariant}; color: ${M3.onSurfaceVariant};">
+              <td colspan="${columns.length}" style="padding: 8px 12px; text-align: center;">
                 ... and ${data.length - maxRows} more rows truncated for email readability.
               </td>
             </tr>
@@ -288,7 +280,7 @@ function renderDynamicData(data) {
   }
 
   if (typeof data === "object" && Object.keys(data).length > 0) {
-    return `<pre style="background-color: ${NORD.polarNight1}; padding: 8px; border-radius: 4px; font-size: 11px; color: ${NORD.snowStorm1}; margin: 8px 0 0 0; overflow-x: auto;"><code>${JSON.stringify(data, null, 2)}</code></pre>`;
+    return `<pre style="background-color: ${M3.surfaceContainer}; padding: 12px; border-radius: 12px; font-size: 12px; color: ${M3.onSurface}; margin: 8px 0 0 0; overflow-x: auto;"><code>${JSON.stringify(data, null, 2)}</code></pre>`;
   }
 
   return "";
@@ -303,14 +295,29 @@ export async function sendQcEmail(qcResults, targetDate = new Date()) {
   const failed = (qcResults.results || []).filter((c) => !c.passed);
   const criticals = failed.filter((c) => c.severity === "CRITICAL").length;
   const warnings = failed.length - criticals;
-  const statusFlag = criticals > 0 ? "[FAIL - ACTION REQUIRED]" : warnings > 0 ? `[PASS · ${warnings} warning${warnings > 1 ? "s" : ""}]` : "[PASS]";
+  const statusFlag =
+    criticals > 0
+      ? "[FAIL - ACTION REQUIRED]"
+      : warnings > 0
+        ? `[PASS · ${warnings} warning${warnings > 1 ? "s" : ""}]`
+        : "[PASS]";
   const subject = `findb-engine: qc status ${statusFlag}`;
   const htmlBody = buildQcEmailHtml(qcResults, targetDate);
 
-  // Hardcoded destination target from config
-  const recipient = config.targetEmailRecipient;
+  console.log(
+    `[QC NOTIFIER] Dispatching QC digest to ${config.targetEmailRecipient}...`,
+  );
+  await sendHtmlEmail(subject, htmlBody);
+  console.log(`[QC NOTIFIER] Status email dispatched successfully.`);
+}
 
-  // Initialize SMTP transport with environment credentials
+/**
+ * Sends an HTML email to config.targetEmailRecipient, from the same Gmail account (Google App Password).
+ *
+ * @param {string} subject
+ * @param {string} html
+ */
+export async function sendHtmlEmail(subject, html) {
   const transporter = nodemailer.createTransport({
     host: "smtp.gmail.com",
     port: 465,
@@ -320,15 +327,10 @@ export async function sendQcEmail(qcResults, targetDate = new Date()) {
       pass: config.smtpPassword, // Google App Password (16 chars)
     },
   });
-
-  console.log(`[QC NOTIFIER] Dispatching QC digest to ${recipient}...`);
-
   await transporter.sendMail({
     from: `"FinDB Engine" <${config.targetEmailRecipient}>`,
-    to: recipient,
-    subject: subject,
-    html: htmlBody,
+    to: config.targetEmailRecipient,
+    subject,
+    html,
   });
-
-  console.log(`[QC NOTIFIER] Status email dispatched successfully.`);
 }

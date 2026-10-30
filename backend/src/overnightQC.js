@@ -484,9 +484,13 @@ const MIN_VALUE_CHECKED = 500;
 /** Allowed |move| (%) given the moves before it (%, oldest first): JUMP_SIGMAS x their standard deviation. */
 function jumpLimit(previousMoves, minPct = JUMP_MIN_PCT) {
   const moves = previousMoves.slice(-JUMP_LOOKBACK);
-  if (moves.length < JUMP_MIN_HISTORY) return { limit: Math.max(JUMP_DEFAULT_PCT, minPct), sigma: null };
+  if (moves.length < JUMP_MIN_HISTORY)
+    return { limit: Math.max(JUMP_DEFAULT_PCT, minPct), sigma: null };
   const mean = moves.reduce((sum, move) => sum + move, 0) / moves.length;
-  const sigma = Math.sqrt(moves.reduce((sum, move) => sum + (move - mean) ** 2, 0) / (moves.length - 1));
+  const sigma = Math.sqrt(
+    moves.reduce((sum, move) => sum + (move - mean) ** 2, 0) /
+      (moves.length - 1),
+  );
   return { limit: Math.max(JUMP_SIGMAS * sigma, minPct), sigma };
 }
 
@@ -986,14 +990,29 @@ export async function checkNavJumps(targetDate = new Date()) {
      FROM series s JOIN portfolios f USING (portfolio_id)
      WHERE s.date > $1::date - $5::int - 7 AND s.date <= $1::date AND abs(s.prev_nav) >= $4
      ORDER BY s.portfolio_id, s.date;`,
-    [dateStr, EXTERNAL_IN, EXTERNAL_OUT, MIN_VALUE_CHECKED, Math.ceil(JUMP_LOOKBACK * 1.5)],
+    [
+      dateStr,
+      EXTERNAL_IN,
+      EXTERNAL_OUT,
+      MIN_VALUE_CHECKED,
+      Math.ceil(JUMP_LOOKBACK * 1.5),
+    ],
   );
   const recentFrom = utils.addDays(dateStr, -6);
   const byPortfolio = new Map();
-  for (const move of series) (byPortfolio.get(move.portfolio_id) ?? byPortfolio.set(move.portfolio_id, []).get(move.portfolio_id)).push(move);
+  for (const move of series)
+    (
+      byPortfolio.get(move.portfolio_id) ??
+      byPortfolio.set(move.portfolio_id, []).get(move.portfolio_id)
+    ).push(move);
   const rows = [];
   for (const moves of byPortfolio.values()) {
-    const pcts = moves.map((move) => ((move.nav - move.prev_nav - move.net_flows) / Math.abs(move.prev_nav)) * 100);
+    const pcts = moves.map(
+      (move) =>
+        ((move.nav - move.prev_nav - move.net_flows) /
+          Math.abs(move.prev_nav)) *
+        100,
+    );
     moves.forEach((move, index) => {
       if (move.date < recentFrom) return;
       const { limit, sigma } = jumpLimit(pcts.slice(0, index));
@@ -1130,12 +1149,21 @@ export async function checkAggregateJumps(targetDate = new Date()) {
     [dateStr, EXTERNAL_IN, EXTERNAL_OUT, MIN_VALUE_CHECKED, JUMP_LOOKBACK],
   );
   const byAggregate = new Map();
-  for (const day of series) (byAggregate.get(day.aggregate_id) ?? byAggregate.set(day.aggregate_id, []).get(day.aggregate_id)).push(day);
+  for (const day of series)
+    (
+      byAggregate.get(day.aggregate_id) ??
+      byAggregate.set(day.aggregate_id, []).get(day.aggregate_id)
+    ).push(day);
   const rows = [];
   for (const days of byAggregate.values()) {
     const today = days.at(-1);
     if (today.date !== dateStr) continue;
-    const pcts = days.map((day) => ((day.nav_eur - day.prev_nav_eur - day.net_flows_eur) / Math.abs(day.prev_nav_eur)) * 100);
+    const pcts = days.map(
+      (day) =>
+        ((day.nav_eur - day.prev_nav_eur - day.net_flows_eur) /
+          Math.abs(day.prev_nav_eur)) *
+        100,
+    );
     const { limit, sigma } = jumpLimit(pcts.slice(0, -1));
     if (Math.abs(pcts.at(-1)) > limit)
       rows.push({
@@ -1228,9 +1256,12 @@ export async function checkPerformanceResiduals(targetDate = new Date()) {
     [dateStr, RESIDUAL_WARN_PCT, MIN_VALUE_CHECKED_PERF],
   );
   return qcResult("checkPerformanceResiduals", dateStr, rows, {
-    severity: rows.some((row) => Math.abs(row.residual_pct) > RESIDUAL_FAIL_PCT) ? "CRITICAL" : "WARNING",
+    severity: rows.some((row) => Math.abs(row.residual_pct) > RESIDUAL_FAIL_PCT)
+      ? "CRITICAL"
+      : "WARNING",
     ok: `No performance residual above ${RESIDUAL_WARN_PCT}%.`,
-    fail: (n) => `${n} performance brick(s) with a residual above ${RESIDUAL_WARN_PCT}%.`,
+    fail: (n) =>
+      `${n} performance brick(s) with a residual above ${RESIDUAL_WARN_PCT}%.`,
     message: `Returns the positions / navs don't explain (positions vs ledger, nav vs positions); above ${RESIDUAL_FAIL_PCT}% is critical:`,
   });
 }
@@ -1250,7 +1281,8 @@ export async function checkPerformanceCoverage(targetDate = new Date()) {
     severity: "CRITICAL",
     ok: "Every nav of the performance portfolios has its performance brick.",
     fail: (n) => `${n} performance portfolio(s) with navs and no performance.`,
-    message: "Navs with no performance brick (the aggregates would count these days as 0%):",
+    message:
+      "Navs with no performance brick (the aggregates would count these days as 0%):",
   });
 }
 
@@ -1273,15 +1305,36 @@ export async function checkPerformanceJumps(targetDate = new Date()) {
   );
   const recentFrom = utils.addDays(dateStr, -6);
   const bySeries = new Map();
-  for (const brick of bricks) (bySeries.get(`${brick.level}|${brick.id}`) ?? bySeries.set(`${brick.level}|${brick.id}`, []).get(`${brick.level}|${brick.id}`)).push(brick);
+  for (const brick of bricks)
+    (
+      bySeries.get(`${brick.level}|${brick.id}`) ??
+      bySeries
+        .set(`${brick.level}|${brick.id}`, [])
+        .get(`${brick.level}|${brick.id}`)
+    ).push(brick);
   const rows = [];
   for (const series of bySeries.values()) {
     const pcts = series.map((brick) => brick.pct);
     series.forEach((brick, index) => {
-      if (brick.end_date < recentFrom || (brick.level === "portfolio" && Math.abs(brick.start_nav) < MIN_VALUE_CHECKED)) return;
-      const { limit, sigma } = jumpLimit(pcts.slice(0, index), PERF_JUMP_MIN_PCT[brick.level]);
+      if (
+        brick.end_date < recentFrom ||
+        (brick.level === "portfolio" &&
+          Math.abs(brick.start_nav) < MIN_VALUE_CHECKED)
+      )
+        return;
+      const { limit, sigma } = jumpLimit(
+        pcts.slice(0, index),
+        PERF_JUMP_MIN_PCT[brick.level],
+      );
       if (Math.abs(brick.pct) > limit)
-        rows.push({ level: brick.level, id: brick.id, end_date: brick.end_date, return_pct: round(brick.pct), sigma_pct: round(sigma), limit_pct: round(limit) });
+        rows.push({
+          level: brick.level,
+          id: brick.id,
+          end_date: brick.end_date,
+          return_pct: round(brick.pct),
+          sigma_pct: round(sigma),
+          limit_pct: round(limit),
+        });
     });
   }
   return qcResult("checkPerformanceJumps", dateStr, rows, {
@@ -1289,7 +1342,8 @@ export async function checkPerformanceJumps(targetDate = new Date()) {
     failureType: "PROBABILISTIC",
     ok: "No unusual daily return in the last 7 days.",
     fail: (n) => `Found ${n} unusual daily return(s).`,
-    message: "Returns beyond 3σ of their last 90 days (a wrong price or fx rate? money in / out is already removed):",
+    message:
+      "Returns beyond 3σ of their last 90 days (a wrong price or fx rate? money in / out is already removed):",
   });
 }
 
@@ -1305,7 +1359,8 @@ export async function checkTradeSpikes(targetDate = new Date()) {
     severity: "WARNING",
     ok: `No trade return above ${TRADE_SPIKE_PCT}%.`,
     fail: (n) => `${n} brick(s) with a trade return above ${TRADE_SPIKE_PCT}%.`,
-    message: "Trades booked far from the closing price (a wrong price or quantity in the ledger?):",
+    message:
+      "Trades booked far from the closing price (a wrong price or quantity in the ledger?):",
   });
 }
 
@@ -1332,8 +1387,10 @@ export async function hasPerformanceRunToday(targetDate = new Date()) {
   return qcResult("hasPerformanceRunToday", dateStr, rows, {
     severity: "CRITICAL",
     ok: "Performance is up to date for every portfolio and aggregate.",
-    fail: (n) => `${n} portfolio(s) / aggregate(s) with performance behind their navs.`,
-    message: "Performance not computed up to the latest nav (did the performance step fail?):",
+    fail: (n) =>
+      `${n} portfolio(s) / aggregate(s) with performance behind their navs.`,
+    message:
+      "Performance not computed up to the latest nav (did the performance step fail?):",
   });
 }
 
@@ -1430,7 +1487,8 @@ export async function checkRiskGaps(targetDate = new Date()) {
     severity: "WARNING",
     ok: "Every security held has a usable risk series.",
     fail: (n) => `${n} security(ies) held without usable risk.`,
-    message: "Held securities without risk (they count as 0 risk in the portfolios and aggregates):",
+    message:
+      "Held securities without risk (they count as 0 risk in the portfolios and aggregates):",
   });
 }
 
@@ -1447,8 +1505,10 @@ export async function checkRiskCoverage(targetDate = new Date()) {
   return qcResult("checkRiskCoverage", dateStr, rows, {
     severity: "WARNING",
     ok: `Every portfolio / aggregate risk covers at least ${RISK_MIN_COVERAGE_PCT}% of its value.`,
-    fail: (n) => `${n} portfolio(s) / aggregate(s) with risk on less than ${RISK_MIN_COVERAGE_PCT}% of their value.`,
-    message: "Risk computed on part of the holdings only (the rest has no price history / proxy): the numbers are understated:",
+    fail: (n) =>
+      `${n} portfolio(s) / aggregate(s) with risk on less than ${RISK_MIN_COVERAGE_PCT}% of their value.`,
+    message:
+      "Risk computed on part of the holdings only (the rest has no price history / proxy): the numbers are understated:",
   });
 }
 
@@ -1459,19 +1519,179 @@ export async function checkRiskCoverage(targetDate = new Date()) {
 export async function checkTaxPaid(targetDate = new Date()) {
   const dateStr = utils.formatDateToISO(targetDate);
   const year = Number(dateStr.slice(0, 4)) - 1;
-  const { rows } = Number(dateStr.slice(5, 7)) < 11 ? { rows: [] } : await query(
-    `SELECT t.tax_year, round(sum(t.value_eur)::numeric, 2)::float AS owed_eur
+  const { rows } =
+    Number(dateStr.slice(5, 7)) < 11
+      ? { rows: [] }
+      : await query(
+          `SELECT t.tax_year, round(sum(t.value_eur)::numeric, 2)::float AS owed_eur
      FROM tax_items t JOIN portfolios p USING (portfolio_id)
      WHERE t.tax_year = $1 AND ((t.item = 'TAX_EST' AND p.fiscal_regime LIKE 'DICHIARATIVO%') OR (t.item = 'IVAFE_EST' AND p.ivafe_taxable))
        AND NOT EXISTS (SELECT 1 FROM tax_payments x WHERE x.tax_year = t.tax_year)
      GROUP BY 1 HAVING sum(t.value_eur) > 0;`,
-    [year],
-  );
+          [year],
+        );
   return qcResult("checkTaxPaid", dateStr, rows, {
     severity: "WARNING",
     ok: "Last year's declared tax is marked as paid (or nothing is owed).",
     fail: () => `Tax year ${year} is not marked as paid.`,
-    message: "Declared tax still owed in REALIZED_TAX: add a TAX_PAID event when it is paid:",
+    message:
+      "Declared tax still owed in REALIZED_TAX: add a TAX_PAID event when it is paid:",
+  });
+}
+
+// ============================================================================
+// BREAKDOWNS (user, 2026-10-30)
+// ============================================================================
+const BREAKDOWN_TABLES = [
+  ["security", "security_breakdowns", "security_id"],
+  ["portfolio", "portfolio_breakdowns", "portfolio_id"],
+  ["aggregate", "aggregate_breakdowns", "aggregate_id"],
+];
+const SECURITY_BREAKDOWNS = [
+  "ASSET_TYPE",
+  "CURRENCY",
+  "ASSET_CLASS",
+  "REGION",
+  "ASSET_CLASSIFICATION",
+  "ITALY_EXPOSURE",
+];
+const LOOKTHROUGH_BREAKDOWNS = [
+  "CURRENCY_LT",
+  "ASSET_CLASS_LT",
+  "REGION_LT",
+  "ASSET_CLASSIFICATION_LT",
+];
+const PORTFOLIO_BREAKDOWNS = [
+  ...SECURITY_BREAKDOWNS,
+  ...LOOKTHROUGH_BREAKDOWNS,
+  "PORTFOLIO_TYPE",
+  "LIQUIDATION_TIME_STANDARD",
+  "LIQUIDATION_TIME_URGENT",
+];
+const OPEN_END = "2222-12-31";
+// "Other" above this in a lookthrough dimension: positions not adding up to the nav, or a big holding with a thin shape
+const BREAKDOWN_OTHER_MAX_PCT = 20;
+// Held funds / ETFs / structured products below this value don't need a lookthrough shape
+const LOOKTHROUGH_MIN_VALUE = 1000;
+
+/**
+ * B1: breakdown intervals are consistent in every table: no two intervals of one entity / dimension overlap, and the
+ * weights of every interval sum to 100.
+ */
+export async function checkBreakdownIntegrity(targetDate = new Date()) {
+  const dateStr = utils.formatDateToISO(targetDate);
+  const rows = [];
+  for (const [level, table, key] of BREAKDOWN_TABLES) {
+    const { rows: found } = await query(
+      `WITH intervals AS (
+         SELECT ${key} AS id, breakdown, start_date, end_date, sum(weight)::float AS total FROM ${table} GROUP BY 1, 2, 3, 4
+       ),
+       ordered AS (
+         SELECT *, LAG(end_date) OVER (PARTITION BY id, breakdown ORDER BY start_date, end_date) AS prev_end FROM intervals
+       )
+       SELECT $1::text AS level, id, breakdown, start_date::text, end_date::text,
+              CASE WHEN prev_end > start_date THEN 'overlaps the previous interval (ends ' || prev_end::text || ')'
+                   ELSE 'weights sum to ' || round(total::numeric, 2)::text END AS problem
+       FROM ordered WHERE prev_end > start_date OR abs(total - 100) > 0.01
+       ORDER BY id, breakdown, start_date;`,
+      [level],
+    );
+    rows.push(...found);
+  }
+  return qcResult("checkBreakdownIntegrity", dateStr, rows, {
+    severity: "CRITICAL",
+    ok: "Breakdown intervals don't overlap and every one sums to 100.",
+    fail: (n) => `Found ${n} broken breakdown interval(s).`,
+    message:
+      "Overlapping intervals or weights not summing to 100 (a breakdown writer bug?):",
+  });
+}
+
+/**
+ * B2: breakdowns ran: every active portfolio with a non-zero latest nav has a current interval (open until 2222-12-31)
+ * for each security and portfolio dimension, every aggregate with a breakdown_scope for each dimension of its scope.
+ */
+export async function hasBreakdownsRunToday(targetDate = new Date()) {
+  const dateStr = utils.formatDateToISO(targetDate);
+  const { rows } = await query(
+    `WITH expected AS (
+       SELECT 'portfolio' AS level, p.portfolio_id AS id, d AS breakdown
+       FROM portfolios p
+       JOIN LATERAL (SELECT nav FROM nav n WHERE n.portfolio_id = p.portfolio_id AND n.date <= $1::date ORDER BY n.date DESC LIMIT 1) n ON true
+       CROSS JOIN unnest($2::text[]) d
+       WHERE p.closed_date IS NULL AND p.inception_date <= $1::date AND n.nav <> 0
+       UNION ALL
+       SELECT 'aggregate', a.aggregate_id, d
+       FROM aggregates a CROSS JOIN unnest($2::text[]) d
+       WHERE (a.breakdown_scope = 'ALL' OR (a.breakdown_scope = 'LT_ONLY' AND d = ANY($3)))
+         AND EXISTS (SELECT 1 FROM aggregate_nav x WHERE x.aggregate_id = a.aggregate_id AND x.date <= $1::date)
+     )
+     SELECT e.level, e.id, string_agg(e.breakdown, ', ' ORDER BY e.breakdown) AS missing
+     FROM expected e
+     WHERE NOT EXISTS (
+       SELECT 1 FROM portfolio_breakdowns b WHERE e.level = 'portfolio' AND b.portfolio_id = e.id AND b.breakdown = e.breakdown AND b.end_date = $4::date
+       UNION ALL
+       SELECT 1 FROM aggregate_breakdowns b WHERE e.level = 'aggregate' AND b.aggregate_id = e.id AND b.breakdown = e.breakdown AND b.end_date = $4::date
+     )
+     GROUP BY 1, 2 ORDER BY 1, 2;`,
+    [dateStr, PORTFOLIO_BREAKDOWNS, LOOKTHROUGH_BREAKDOWNS, OPEN_END],
+  );
+  return qcResult("hasBreakdownsRunToday", dateStr, rows, {
+    severity: "CRITICAL",
+    ok: "Every active portfolio and aggregate has current breakdowns.",
+    fail: (n) => `${n} portfolio(s) / aggregate(s) without current breakdowns.`,
+    message:
+      "Dimensions without a current interval (did the breakdown step fail or skip them?):",
+  });
+}
+
+/** B3: current "Other" above BREAKDOWN_OTHER_MAX_PCT in a lookthrough dimension of a portfolio / aggregate. */
+export async function checkBreakdownOther(targetDate = new Date()) {
+  const dateStr = utils.formatDateToISO(targetDate);
+  const { rows } = await query(
+    `SELECT 'portfolio' AS level, portfolio_id AS id, breakdown, weight::float AS other_pct FROM portfolio_breakdowns
+     WHERE end_date = $1::date AND sector = 'Other' AND breakdown = ANY($2) AND weight > $3
+     UNION ALL
+     SELECT 'aggregate', aggregate_id, breakdown, weight::float FROM aggregate_breakdowns
+     WHERE end_date = $1::date AND sector = 'Other' AND breakdown = ANY($2) AND weight > $3
+     ORDER BY 4 DESC;`,
+    [OPEN_END, LOOKTHROUGH_BREAKDOWNS, BREAKDOWN_OTHER_MAX_PCT],
+  );
+  return qcResult("checkBreakdownOther", dateStr, rows, {
+    severity: "WARNING",
+    ok: `No lookthrough breakdown with more than ${BREAKDOWN_OTHER_MAX_PCT}% in "Other".`,
+    fail: (n) =>
+      `${n} lookthrough breakdown(s) with more than ${BREAKDOWN_OTHER_MAX_PCT}% in "Other".`,
+    message: `"Other" above ${BREAKDOWN_OTHER_MAX_PCT}% (positions not adding up to the nav, or a big holding with a thin lookthrough shape?):`,
+  });
+}
+
+/**
+ * B4: funds, ETFs and structured products held today (positions of the latest nav, worth at least
+ * LOOKTHROUGH_MIN_VALUE EUR) without a lookthrough shape active today: their _LT breakdowns fall back to the
+ * security's own attribute. Input for the lookthrough data project.
+ */
+export async function checkLookthroughCoverage(targetDate = new Date()) {
+  const dateStr = utils.formatDateToISO(targetDate);
+  const { rows } = await query(
+    `SELECT p.security_id, s.asset_type, string_agg(DISTINCT p.portfolio_id, ', ') AS portfolios,
+            round(sum(p.market_value_eur)::numeric, 0)::float AS value_eur
+     FROM positions p
+     JOIN (SELECT portfolio_id, max(date) AS d FROM nav WHERE date <= $1::date GROUP BY 1) m ON m.portfolio_id = p.portfolio_id AND m.d = p.date
+     JOIN portfolios f ON f.portfolio_id = p.portfolio_id
+     JOIN security_master s ON s.security_id = p.security_id
+     WHERE f.closed_date IS NULL AND abs(p.quantity) > 1e-5 AND s.asset_type IN ('ETF', 'FUND', 'STRUCTURED_PRODUCT')
+       AND NOT EXISTS (SELECT 1 FROM lookthrough_data l WHERE l.security_id = p.security_id AND l.start_date <= $1::date AND $1::date < l.end_date)
+     GROUP BY 1, 2 HAVING sum(abs(p.market_value_eur)) >= $2
+     ORDER BY 4 DESC;`,
+    [dateStr, LOOKTHROUGH_MIN_VALUE],
+  );
+  return qcResult("checkLookthroughCoverage", dateStr, rows, {
+    severity: "WARNING",
+    ok: "Every fund / ETF / structured product held has a lookthrough shape.",
+    fail: (n) => `${n} fund(s) / ETF(s) held without a lookthrough shape.`,
+    message:
+      "Held without lookthrough data (their _LT breakdowns use the security's own attribute):",
   });
 }
 
@@ -1514,6 +1734,10 @@ export const overnightQC = {
   hasRiskRunToday,
   checkRiskGaps,
   checkRiskCoverage,
+  checkBreakdownIntegrity,
+  hasBreakdownsRunToday,
+  checkBreakdownOther,
+  checkLookthroughCoverage,
   runAll,
 };
 
@@ -1565,6 +1789,11 @@ async function runAll(targetDate = new Date()) {
     hasRiskRunToday(targetDate),
     checkRiskGaps(targetDate),
     checkRiskCoverage(targetDate),
+    // breakdowns
+    checkBreakdownIntegrity(targetDate),
+    hasBreakdownsRunToday(targetDate),
+    checkBreakdownOther(targetDate),
+    checkLookthroughCoverage(targetDate),
   ]);
 
   return { results };

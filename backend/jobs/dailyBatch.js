@@ -19,6 +19,7 @@ import { performance } from "../src/performance.js";
 import { risk } from "../src/risk.js";
 import { breakdowns } from "../src/breakdowns.js";
 import { sendQcEmail } from "../src/qcNotification.js";
+import { dailyStats } from "../src/dailyStats.js";
 
 async function executePipeline() {
   // 1. Master Market Data Pipeline (fx rates, crypto, prices)
@@ -78,6 +79,8 @@ async function executePipeline() {
     );
   } else {
     await sendQcEmail(qcResults, config.date);
+    // "Daily FinDB": liquid net worth and its change from yesterday
+    await dailyStats.run(config.date);
   }
 }
 
