@@ -803,7 +803,7 @@ export async function checkPositionsVsLedger(targetDate = new Date()) {
   const dateStr = utils.formatDateToISO(targetDate);
   const { rows: valued } = await query(
     `SELECT f.portfolio_id FROM portfolios f JOIN nav n ON n.portfolio_id = f.portfolio_id AND n.date = $1::date
-     WHERE f.valuation_method IN ('ROLL', 'CUSTOM') AND f.portfolio_id <> 'UNREALIZED_TAX' ORDER BY 1;`,
+     WHERE f.valuation_method IN ('ROLL', 'CUSTOM') AND f.portfolio_id NOT IN ('UNREALIZED_TAX', 'REALIZED_TAX') ORDER BY 1;`,
     [dateStr],
   );
   const rows = [];
@@ -1337,6 +1337,121 @@ export async function hasPerformanceRunToday(targetDate = new Date()) {
   });
 }
 
+// ============================================================================
+// PRICES & RISK (user, 2026-10-30)
+// ============================================================================
+// Price moves: 3σ of the security's last 90 moves like the fx / nav jumps, never below 2% (money market / bond funds
+// hit 20-30σ on 0.5% moves); only prices written today of securities held
+const PRICE_JUMP_SIGMAS = 3;
+const PRICE_JUMP_LOOKBACK = 90;
+const PRICE_JUMP_MIN_PCT = 2;
+// Risk computed on less than this share of a portfolio / aggregate (holdings without a usable series) is understated
+const RISK_MIN_COVERAGE_PCT = 90;
+
+/** SP1: prices written today, of securities held today, moving beyond 3σ of their last 90 moves (and 2%). */
+export async function checkPriceJumps(targetDate = new Date()) {
+  const dateStr = utils.formatDateToISO(targetDate);
+  const { rows } = await query(
+    `WITH held AS (
+       SELECT DISTINCT p.security_id FROM positions p
+       JOIN (SELECT portfolio_id, max(date) AS d FROM nav WHERE date <= $1::date GROUP BY 1) m ON m.portfolio_id = p.portfolio_id AND m.d = p.date
+       JOIN portfolios f ON f.portfolio_id = p.portfolio_id WHERE f.closed_date IS NULL AND abs(p.quantity) > 1e-5
+     ),
+     moves AS (
+       SELECT x.security_id, x.date, x.created_at, x.price, LAG(x.price) OVER w AS prev_price,
+              x.price / NULLIF(LAG(x.price) OVER w, 0) - 1 AS move
+       FROM prices x JOIN held USING (security_id)
+       WHERE x.date > $1::date - $2::int * 2 AND x.date <= $1::date
+       WINDOW w AS (PARTITION BY x.security_id ORDER BY x.date)
+     ),
+     scored AS (
+       SELECT *, stddev_pop(move) OVER (PARTITION BY security_id ORDER BY date ROWS BETWEEN $2::int PRECEDING AND 1 PRECEDING) AS sigma FROM moves
+     )
+     SELECT security_id, date::text, round(prev_price::numeric, 4)::float AS prev_price, round(price::numeric, 4)::float AS price,
+            round((move * 100)::numeric, 2)::float AS move_pct, round((sigma * 100)::numeric, 3)::float AS sigma_pct,
+            round((greatest(sigma * $3, $4 / 100.0) * 100)::numeric, 2)::float AS limit_pct
+     FROM scored WHERE created_at >= $1::date AND move IS NOT NULL AND sigma IS NOT NULL
+       AND abs(move) > greatest(sigma * $3, $4 / 100.0)
+     ORDER BY abs(move) DESC;`,
+    [dateStr, PRICE_JUMP_LOOKBACK, PRICE_JUMP_SIGMAS, PRICE_JUMP_MIN_PCT],
+  );
+  return qcResult("checkPriceJumps", dateStr, rows, {
+    severity: "WARNING",
+    failureType: "PROBABILISTIC",
+    ok: "No unusual price move today.",
+    fail: (n) => `Found ${n} unusual price move(s).`,
+    message: `Prices written today moving beyond ${PRICE_JUMP_SIGMAS}σ of their last ${PRICE_JUMP_LOOKBACK} moves and ${PRICE_JUMP_MIN_PCT}% (a bad tick?):`,
+  });
+}
+
+/** R1: risk ran: snapshots today for the securities held, the active performance portfolios and the aggregates with a nav. */
+export async function hasRiskRunToday(targetDate = new Date()) {
+  const dateStr = utils.formatDateToISO(targetDate);
+  const { rows } = await query(
+    `SELECT 'security' AS level, count(*)::int AS snapshots FROM (SELECT DISTINCT security_id FROM security_risk WHERE date = $1::date) s
+     UNION ALL SELECT 'portfolio', count(DISTINCT portfolio_id)::int FROM portfolio_risk WHERE date = $1::date
+     UNION ALL SELECT 'aggregate', count(DISTINCT aggregate_id)::int FROM aggregate_risk WHERE date = $1::date;`,
+    [dateStr],
+  );
+  const missing = rows.filter((row) => row.snapshots === 0);
+  return qcResult("hasRiskRunToday", dateStr, missing, {
+    severity: "CRITICAL",
+    ok: `Risk snapshots written today (${rows.map((row) => `${row.snapshots} ${row.level}`).join(", ")}).`,
+    fail: (n) => `No risk snapshot today for ${n} level(s).`,
+    message: "Risk levels without today's snapshot (did the risk step fail?):",
+  });
+}
+
+/**
+ * R2: no usable risk: a security held today without today's snapshot (a price hole longer than 3 sessions and no risk
+ * proxy; real assets without a proxy are skipped by design), or with a 1Y volatility of exactly 0 (prices that never
+ * move: a stale or flat feed).
+ */
+export async function checkRiskGaps(targetDate = new Date()) {
+  const dateStr = utils.formatDateToISO(targetDate);
+  const { rows } = await query(
+    `WITH held AS (
+       SELECT DISTINCT p.security_id FROM positions p
+       JOIN (SELECT portfolio_id, max(date) AS d FROM nav WHERE date <= $1::date GROUP BY 1) m ON m.portfolio_id = p.portfolio_id AND m.d = p.date
+       JOIN portfolios f ON f.portfolio_id = p.portfolio_id
+       WHERE f.closed_date IS NULL AND abs(p.quantity) > 1e-5
+     )
+     SELECT h.security_id, s.asset_type, 'no risk snapshot (price hole, no proxy?)' AS problem FROM held h JOIN security_master s USING (security_id)
+     WHERE NOT (s.asset_type IN ('REAL_ASSET', 'REAL_ESTATE') AND s.risk_proxy IS NULL)
+       AND NOT EXISTS (SELECT 1 FROM security_risk r WHERE r.security_id = h.security_id AND r.date = $1::date)
+     UNION ALL
+     SELECT r.security_id, s.asset_type, '1Y volatility 0 (stale / flat prices?)' FROM security_risk r JOIN security_master s USING (security_id)
+     JOIN held h ON h.security_id = r.security_id
+     WHERE r.date = $1::date AND r.metric = 'VOLATILITY_1Y' AND r.value = 0 AND s.asset_type NOT IN ('CASH', 'DEBT')
+     ORDER BY 1;`,
+    [dateStr],
+  );
+  return qcResult("checkRiskGaps", dateStr, rows, {
+    severity: "WARNING",
+    ok: "Every security held has a usable risk series.",
+    fail: (n) => `${n} security(ies) held without usable risk.`,
+    message: "Held securities without risk (they count as 0 risk in the portfolios and aggregates):",
+  });
+}
+
+/** R5: portfolio / aggregate risk computed on less than RISK_MIN_COVERAGE_PCT of its value (holdings without a series). */
+export async function checkRiskCoverage(targetDate = new Date()) {
+  const dateStr = utils.formatDateToISO(targetDate);
+  const { rows } = await query(
+    `SELECT 'portfolio' AS level, portfolio_id AS id, value::float AS coverage_pct FROM portfolio_risk WHERE date = $1::date AND metric = 'COVERAGE_PCT' AND value < $2
+     UNION ALL
+     SELECT 'aggregate', aggregate_id, value::float FROM aggregate_risk WHERE date = $1::date AND metric = 'COVERAGE_PCT' AND value < $2
+     ORDER BY 3;`,
+    [dateStr, RISK_MIN_COVERAGE_PCT],
+  );
+  return qcResult("checkRiskCoverage", dateStr, rows, {
+    severity: "WARNING",
+    ok: `Every portfolio / aggregate risk covers at least ${RISK_MIN_COVERAGE_PCT}% of its value.`,
+    fail: (n) => `${n} portfolio(s) / aggregate(s) with risk on less than ${RISK_MIN_COVERAGE_PCT}% of their value.`,
+    message: "Risk computed on part of the holdings only (the rest has no price history / proxy): the numbers are understated:",
+  });
+}
+
 /**
  * T6: from November, last year's declared tax (DICHIARATIVO capital gains + IVAFE, in tax_items) has a tax_payments row
  * (TAX_PAID event), else REALIZED_TAX keeps it as owed: was the payment not recorded?
@@ -1395,6 +1510,10 @@ export const overnightQC = {
   checkTradeSpikes,
   hasPerformanceRunToday,
   checkTaxPaid,
+  checkPriceJumps,
+  hasRiskRunToday,
+  checkRiskGaps,
+  checkRiskCoverage,
   runAll,
 };
 
@@ -1441,6 +1560,11 @@ async function runAll(targetDate = new Date()) {
     checkTradeSpikes(targetDate),
     // taxes
     checkTaxPaid(targetDate),
+    // prices & risk
+    checkPriceJumps(targetDate),
+    hasRiskRunToday(targetDate),
+    checkRiskGaps(targetDate),
+    checkRiskCoverage(targetDate),
   ]);
 
   return { results };

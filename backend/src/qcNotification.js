@@ -41,12 +41,11 @@ export function buildQcEmailHtml(qcResults, targetDate = new Date()) {
     (c) => !c.passed && c.severity === "WARNING",
   );
 
+  // Warnings (probabilistic checks: price / fx / nav jumps) don't fail the night: only a critical does (user)
   const overall =
     criticalCount > 0
       ? { label: "CRITICAL ALERT", color: NORD.auroraRed }
-      : warningCount > 0
-        ? { label: "WARNINGS", color: NORD.auroraOrange }
-        : { label: "ALL GREEN", color: NORD.auroraGreen };
+      : { label: warningCount > 0 ? `PASS · ${warningCount} warning${warningCount > 1 ? "s" : ""}` : "PASS", color: NORD.auroraGreen };
 
   // Email-client rules: Gmail drops <body> styles, so the dark background lives on a full-width outer table
   // (bgcolor + style); the card is a fluid table capped at 640px. Phones: viewport meta + @media rules (supported by
@@ -301,8 +300,10 @@ function renderDynamicData(data) {
  * @param {Date|string} [targetDate=new Date()] - Valuation date
  */
 export async function sendQcEmail(qcResults, targetDate = new Date()) {
-  const isAllPassed = (qcResults.results || []).every((c) => c.passed);
-  const statusFlag = isAllPassed ? "[PASS]" : "[FAIL - ACTION REQUIRED]";
+  const failed = (qcResults.results || []).filter((c) => !c.passed);
+  const criticals = failed.filter((c) => c.severity === "CRITICAL").length;
+  const warnings = failed.length - criticals;
+  const statusFlag = criticals > 0 ? "[FAIL - ACTION REQUIRED]" : warnings > 0 ? `[PASS · ${warnings} warning${warnings > 1 ? "s" : ""}]` : "[PASS]";
   const subject = `findb-engine: qc status ${statusFlag}`;
   const htmlBody = buildQcEmailHtml(qcResults, targetDate);
 

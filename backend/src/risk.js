@@ -25,16 +25,29 @@ const STRESS_SCENARIOS = {
 };
 // A stress scenario needs returns on this share of its sessions (a security born mid-window would show a partial shock)
 const STRESS_MIN_COVERAGE = 0.9;
-// Metrics also given in EUR when a nav is known (portfolio / aggregate)
-const EUR_METRICS = ["MAX_DD_1Y", "VAR_DLY_95", "ES_DLY_95", "VAR_WKL_95", "ES_WKL_95", "VAR_MTH_95", "ES_MTH_95", "GAR_DLY_95", "GAR_WKL_95", "GAR_MTH_95"];
+// Metrics also given in money (<metric>_BASE, in the portfolio / aggregate currency: user, GAS called them _EUR) when a
+// nav is known
+const MONEY_METRICS = [
+  "MAX_DD_1Y",
+  "VAR_DLY_95",
+  "ES_DLY_95",
+  "VAR_WKL_95",
+  "ES_WKL_95",
+  "VAR_MTH_95",
+  "ES_MTH_95",
+  "GAR_DLY_95",
+  "GAR_WKL_95",
+  "GAR_MTH_95",
+];
 const UNIT_VALUED = ["CASH", "DEBT", "CRYPTO"];
 const REAL_ASSETS = ["REAL_ASSET", "REAL_ESTATE"];
 
 /**
  * Nightly risk step, after performance: ex-ante risk snapshots of the securities held, the performance portfolios and
  * the aggregates, as of each date in [from, targetDate] (nightly: the day itself), into security_risk /
- * portfolio_risk / aggregate_risk (one row per metric, the day's rows replaced). Every return series is daily, in EUR,
- * over the full history since 2016 (252-session calendar, 365 days for crypto), today's composition projected on it.
+ * portfolio_risk / aggregate_risk (one row per metric, the day's rows replaced). Every return series is daily, over
+ * the full history since 2016 (252-session calendar, 365 days for crypto), today's composition projected on it, in the
+ * currency of whose risk it is: securities in EUR, portfolios / aggregates in their own currency (AEGON in GBP).
  * Migrated from calculateSecurityRisk // securityData.gs, runPortfolioRisk // portfolioData.gs, runAggregateRisk //
  * aggregateData.gs, evaluateRiskSnapshot // generalScripts.gs
  *
@@ -47,11 +60,25 @@ export async function run(targetDate = new Date(), options = {}) {
   console.log(`[RISK] Starting risk snapshots up to ${dateStr}...`);
   await loadFxRates();
   const data = await loadRiskData(dateStr);
-  const totals = { dates: 0, securities: 0, portfolios: 0, aggregates: 0, failures: [] };
-  for (let day = options.from ?? dateStr; day <= dateStr; day = utils.addDays(day, 1)) {
+  const totals = {
+    dates: 0,
+    securities: 0,
+    portfolios: 0,
+    aggregates: 0,
+    failures: [],
+  };
+  for (
+    let day = options.from ?? dateStr;
+    day <= dateStr;
+    day = utils.addDays(day, 1)
+  ) {
     const result = await riskForDate(data, day);
     await withSavepoint(async () => {
-      for (const [table, key, rows] of [["security_risk", "security_id", result.securityRows], ["portfolio_risk", "portfolio_id", result.portfolioRows], ["aggregate_risk", "aggregate_id", result.aggregateRows]]) {
+      for (const [table, key, rows] of [
+        ["security_risk", "security_id", result.securityRows],
+        ["portfolio_risk", "portfolio_id", result.portfolioRows],
+        ["aggregate_risk", "aggregate_id", result.aggregateRows],
+      ]) {
         await query(`DELETE FROM ${table} WHERE date = $1;`, [day]);
         if (rows.length) await insertRiskRows(table, key, rows);
       }
@@ -62,7 +89,9 @@ export async function run(targetDate = new Date(), options = {}) {
     totals.aggregates += result.counts.aggregates;
     totals.failures.push(...result.failures);
   }
-  console.log(`[RISK] Done: ${totals.dates} day(s), ${totals.securities} security / ${totals.portfolios} portfolio / ${totals.aggregates} aggregate snapshots, ${totals.failures.length} failure(s).`);
+  console.log(
+    `[RISK] Done: ${totals.dates} day(s), ${totals.securities} security / ${totals.portfolios} portfolio / ${totals.aggregates} aggregate snapshots, ${totals.failures.length} failure(s).`,
+  );
   return totals;
 }
 
@@ -70,30 +99,78 @@ export async function run(targetDate = new Date(), options = {}) {
 async function insertRiskRows(table, key, rows) {
   for (let i = 0; i < rows.length; i += 1000) {
     const chunk = rows.slice(i, i + 1000);
-    const values = chunk.map((_, j) => `($${j * 4 + 1}, $${j * 4 + 2}, $${j * 4 + 3}, $${j * 4 + 4})`).join(", ");
-    await query(`INSERT INTO ${table} (${key}, date, metric, value) VALUES ${values};`, chunk.flatMap((row) => [row.id, row.date, row.metric, row.value]));
+    const values = chunk
+      .map(
+        (_, j) =>
+          `($${j * 4 + 1}, $${j * 4 + 2}, $${j * 4 + 3}, $${j * 4 + 4})`,
+      )
+      .join(", ");
+    await query(
+      `INSERT INTO ${table} (${key}, date, metric, value) VALUES ${values};`,
+      chunk.flatMap((row) => [row.id, row.date, row.metric, row.value]),
+    );
   }
 }
 
 /** Reference data, prices, positions, navs and the aggregate tree, loaded once for every date of the run. */
 async function loadRiskData(dateStr) {
-  const securities = new Map((await query(`SELECT security_id, currency, asset_type, risk_proxy FROM security_master;`)).rows.map((row) => [row.security_id, row]));
+  const securities = new Map(
+    (
+      await query(
+        `SELECT security_id, currency, asset_type, risk_proxy FROM security_master;`,
+      )
+    ).rows.map((row) => [row.security_id, row]),
+  );
   const prices = new Map();
-  for (const row of (await query(`SELECT security_id, date::text AS date, price::float FROM prices WHERE date <= $1 AND price > 0;`, [dateStr])).rows)
-    (prices.get(row.security_id) ?? prices.set(row.security_id, new Map()).get(row.security_id)).set(row.date, row.price);
-  const portfolios = new Map((await query(`SELECT * FROM portfolios;`)).rows.map((row) => [row.portfolio_id, row]));
-  const { rows: tree } = await query(`SELECT parent_id, child_id, child_type FROM aggregate_tree;`);
-  const aggregates = (await query(`SELECT aggregate_id, currency FROM aggregates ORDER BY 1;`)).rows;
-  const { rows: overrides } = await query(`SELECT portfolio_id, start_date::text AS start_date, my_share::float AS my_share FROM ownership_overrides ORDER BY portfolio_id, start_date;`);
+  for (const row of (
+    await query(
+      `SELECT security_id, date::text AS date, price::float FROM prices WHERE date <= $1 AND price > 0;`,
+      [dateStr],
+    )
+  ).rows)
+    (
+      prices.get(row.security_id) ??
+      prices.set(row.security_id, new Map()).get(row.security_id)
+    ).set(row.date, row.price);
+  const portfolios = new Map(
+    (await query(`SELECT * FROM portfolios;`)).rows.map((row) => [
+      row.portfolio_id,
+      row,
+    ]),
+  );
+  const { rows: tree } = await query(
+    `SELECT parent_id, child_id, child_type FROM aggregate_tree;`,
+  );
+  const aggregates = (
+    await query(`SELECT aggregate_id, currency FROM aggregates ORDER BY 1;`)
+  ).rows;
+  const { rows: overrides } = await query(
+    `SELECT portfolio_id, start_date::text AS start_date, my_share::float AS my_share FROM ownership_overrides ORDER BY portfolio_id, start_date;`,
+  );
   const calendarDates = [...(prices.get(CALENDAR_BENCHMARK)?.keys() ?? [])]
-    .filter((date) => date >= CALENDAR_START && ![0, 6].includes(new Date(`${date}T00:00:00Z`).getUTCDay()))
+    .filter(
+      (date) =>
+        date >= CALENDAR_START &&
+        ![0, 6].includes(new Date(`${date}T00:00:00Z`).getUTCDay()),
+    )
     .sort();
-  return { securities, prices, portfolios, tree, aggregates, overrides, calendarDates };
+  return {
+    securities,
+    prices,
+    portfolios,
+    tree,
+    aggregates,
+    overrides,
+    calendarDates,
+  };
 }
 
 /** Latest positions / nav of a portfolio on or before a date. */
 async function latestPortfolioState(portfolioId, dateStr) {
-  const { rows: navRows } = await query(`SELECT date::text AS date, nav::float, nav_eur::float FROM nav WHERE portfolio_id = $1 AND date <= $2 ORDER BY date DESC LIMIT 1;`, [portfolioId, dateStr]);
+  const { rows: navRows } = await query(
+    `SELECT date::text AS date, nav::float, nav_eur::float FROM nav WHERE portfolio_id = $1 AND date <= $2 ORDER BY date DESC LIMIT 1;`,
+    [portfolioId, dateStr],
+  );
   if (!navRows.length) return null;
   const { rows: positions } = await query(
     `SELECT security_id, quantity::float, market_value_base::float, market_value_eur::float FROM positions WHERE portfolio_id = $1 AND date = $2;`,
@@ -103,38 +180,71 @@ async function latestPortfolioState(portfolioId, dateStr) {
 }
 
 async function riskForDate(data, day) {
-  const isActive = (portfolio) => utils.formatDateToISO(portfolio.inception_date) <= day && (!portfolio.closed_date || day <= utils.formatDateToISO(portfolio.closed_date));
+  const isActive = (portfolio) =>
+    utils.formatDateToISO(portfolio.inception_date) <= day &&
+    (!portfolio.closed_date ||
+      day <= utils.formatDateToISO(portfolio.closed_date));
   const calendar252 = data.calendarDates.filter((date) => date <= day);
-  const calendar365 = calendar252.length ? utils.daysBetween(calendar252[0], day) : [];
+  const calendar365 = calendar252.length
+    ? utils.daysBetween(calendar252[0], day)
+    : [];
   const failures = [];
   const vectorCache = new Map();
-  // EUR return vector of a security on a calendar (cached); a data hole is a failure: null
-  const vectorFor = (securityId, calendar) => {
-    const cacheKey = `${securityId}|${calendar.length}`;
+  // Return vector of a security on a calendar in a currency (cached); a data hole is a failure: null
+  const vectorFor = (securityId, calendar, currency = "EUR") => {
+    const cacheKey = `${securityId}|${calendar.length}|${currency}`;
     if (vectorCache.has(cacheKey)) return vectorCache.get(cacheKey);
     const meta = data.securities.get(securityId);
     let vector = null;
     if (meta) {
       try {
-        vector = buildSecurityDailyVector(meta, meta.risk_proxy, calendar, data);
+        vector = buildSecurityDailyVector(
+          meta,
+          meta.risk_proxy,
+          calendar,
+          data,
+          currency,
+        );
       } catch (error) {
-        failures.push({ date: day, security_id: securityId, error: error.message });
+        failures.push({
+          date: day,
+          security_id: securityId,
+          error: error.message,
+        });
       }
     }
     vectorCache.set(cacheKey, vector);
     return vector;
   };
   const tails = (calendar, isCrypto) => ({
-    eqTailCluster: extractBenchmarkTailCluster(vectorFor(BENCHMARKS.equity, calendar252), calendar252, TAIL_SESSIONS),
-    fiTailCluster: extractBenchmarkTailCluster(vectorFor(BENCHMARKS.fixedIncome, calendar252), calendar252, TAIL_SESSIONS),
-    cryptoTailCluster: extractBenchmarkTailCluster(vectorFor(BENCHMARKS.crypto, calendar), calendar, TAIL_SESSIONS),
+    eqTailCluster: extractBenchmarkTailCluster(
+      vectorFor(BENCHMARKS.equity, calendar252),
+      calendar252,
+      TAIL_SESSIONS,
+    ),
+    fiTailCluster: extractBenchmarkTailCluster(
+      vectorFor(BENCHMARKS.fixedIncome, calendar252),
+      calendar252,
+      TAIL_SESSIONS,
+    ),
+    cryptoTailCluster: extractBenchmarkTailCluster(
+      vectorFor(BENCHMARKS.crypto, calendar),
+      calendar,
+      TAIL_SESSIONS,
+    ),
     isCrypto,
   });
   const tails252 = tails(calendar252, false);
   const tails365 = tails(calendar365, true);
   const toRows = (record, id) =>
     Object.entries(record)
-      .filter(([metric, value]) => metric !== "id" && value !== null && value !== undefined && Number.isFinite(value))
+      .filter(
+        ([metric, value]) =>
+          metric !== "id" &&
+          value !== null &&
+          value !== undefined &&
+          Number.isFinite(value),
+      )
       .map(([metric, value]) => ({ id, date: day, metric, value }));
 
   // Securities: everything an active portfolio holds that day (real assets only with a risk proxy)
@@ -145,17 +255,26 @@ async function riskForDate(data, day) {
     const state = await latestPortfolioState(portfolio.portfolio_id, day);
     if (!state) continue;
     states.set(portfolio.portfolio_id, state);
-    for (const position of state.positions) if (Math.abs(position.quantity) > 1e-5) held.add(position.security_id);
+    for (const position of state.positions)
+      if (Math.abs(position.quantity) > 1e-5) held.add(position.security_id);
   }
   const securityRows = [];
   let securityCount = 0;
   for (const securityId of [...held].sort()) {
     const meta = data.securities.get(securityId);
-    if (!meta || (REAL_ASSETS.includes(meta.asset_type) && !meta.risk_proxy)) continue;
+    if (!meta || (REAL_ASSETS.includes(meta.asset_type) && !meta.risk_proxy))
+      continue;
     const isCrypto = meta.asset_type === "CRYPTO";
     const calendar = isCrypto ? calendar365 : calendar252;
     const vector = vectorFor(securityId, calendar);
-    const record = vector && evaluateRiskSnapshot(vector, calendar, null, isCrypto ? tails365 : tails252);
+    const record =
+      vector &&
+      evaluateRiskSnapshot(
+        vector,
+        calendar,
+        null,
+        isCrypto ? tails365 : tails252,
+      );
     if (!record) continue;
     securityRows.push(...toRows(record, securityId));
     securityCount++;
@@ -166,30 +285,51 @@ async function riskForDate(data, day) {
   let portfolioCount = 0;
   for (const portfolio of data.portfolios.values()) {
     if (!portfolio.performance || !states.has(portfolio.portfolio_id)) continue;
-    const { nav, navEur, positions } = states.get(portfolio.portfolio_id);
+    const { nav, positions } = states.get(portfolio.portfolio_id);
     if (!positions.length || !nav) continue;
     const isCrypto = portfolio.portfolio_type === "Cryptocurrency Investment";
     const calendar = isCrypto ? calendar365 : calendar252;
     const components = [];
     for (const position of positions) {
       const weight = position.market_value_base / nav;
-      if (weight <= 0.0001 || !data.securities.has(position.security_id)) continue;
-      const vector = vectorFor(position.security_id, calendar);
+      if (weight <= 0.0001 || !data.securities.has(position.security_id))
+        continue;
+      const vector = vectorFor(
+        position.security_id,
+        calendar,
+        portfolio.currency,
+      );
       if (vector) components.push({ weight, vector });
     }
     if (!components.length) continue;
     // Weighted by what is known that session, renormalized; below half the weight known the session is null
     const vector = combine(components, calendar.length - 1, true);
-    const record = evaluateRiskSnapshot(vector, calendar, navEur, isCrypto ? tails365 : tails252);
+    const record = evaluateRiskSnapshot(
+      vector,
+      calendar,
+      nav,
+      isCrypto ? tails365 : tails252,
+    );
     if (!record) continue;
+    // Share of the nav whose holdings have a usable series (QC R5: the rest is assumed to move like them)
+    record.COVERAGE_PCT = truncate(
+      components.reduce((total, component) => total + component.weight, 0) *
+        100,
+      2,
+    );
     portfolioRows.push(...toRows(record, portfolio.portfolio_id));
     portfolioCount++;
   }
 
-  // Aggregates: every position of every non-liability portfolio under it, at the user's share, in EUR over the
-  // aggregate's EUR nav (net of liabilities, so _EUR metrics are the money at risk); cash, real assets without a proxy
-  // and unknown / broken series count as 0 (no daily risk), so the weights cover the whole aggregate
-  const myShare = (portfolioId) => (data.overrides.filter((row) => row.portfolio_id === portfolioId && row.start_date <= day).at(-1)?.my_share ?? 100) / 100;
+  // Aggregates: every position of every non-liability portfolio under it, at the user's share, in the aggregate's
+  // currency over its nav (net of liabilities, so _BASE metrics are the money at risk); its own cash, real assets
+  // without a proxy and unknown / broken series count as 0 (no daily risk), so the weights cover the whole aggregate
+  const myShare = (portfolioId) =>
+    (data.overrides
+      .filter(
+        (row) => row.portfolio_id === portfolioId && row.start_date <= day,
+      )
+      .at(-1)?.my_share ?? 100) / 100;
   const constituents = (id, found = new Set()) => {
     for (const link of data.tree.filter((row) => row.parent_id === id))
       if (link.child_type === "PORTFOLIO") found.add(link.child_id);
@@ -199,37 +339,86 @@ async function riskForDate(data, day) {
   const aggregateRows = [];
   let aggregateCount = 0;
   for (const aggregate of data.aggregates) {
-    const { rows: navRows } = await query(`SELECT nav_eur::float FROM aggregate_nav WHERE aggregate_id = $1 AND date <= $2 ORDER BY date DESC LIMIT 1;`, [aggregate.aggregate_id, day]);
-    const aggregateNavEur = navRows[0]?.nav_eur;
-    if (!aggregateNavEur || aggregateNavEur <= 0) continue;
+    const { rows: navRows } = await query(
+      `SELECT nav::float FROM aggregate_nav WHERE aggregate_id = $1 AND date <= $2 ORDER BY date DESC LIMIT 1;`,
+      [aggregate.aggregate_id, day],
+    );
+    const aggregateNav = navRows[0]?.nav;
+    if (!aggregateNav || aggregateNav <= 0) continue;
     const ids = [...constituents(aggregate.aggregate_id)];
     if (!ids.length) continue;
-    const isCrypto = ids.every((id) => data.portfolios.get(id)?.portfolio_type === "Cryptocurrency Investment");
+    const isCrypto = ids.every(
+      (id) =>
+        data.portfolios.get(id)?.portfolio_type === "Cryptocurrency Investment",
+    );
     const calendar = isCrypto ? calendar365 : calendar252;
     const weights = new Map();
     for (const id of ids) {
       const portfolio = data.portfolios.get(id);
-      if (!portfolio || portfolio.portfolio_type === "Liability" || !states.has(id)) continue;
+      if (
+        !portfolio ||
+        portfolio.portfolio_type === "Liability" ||
+        !states.has(id)
+      )
+        continue;
+      const fx =
+        currencyConverter(portfolio.currency, aggregate.currency, day) ?? 0;
       for (const position of states.get(id).positions) {
-        const weight = ((position.market_value_eur ?? 0) * myShare(id)) / aggregateNavEur;
-        if (weight > 0.00001) weights.set(position.security_id, (weights.get(position.security_id) ?? 0) + weight);
+        const weight =
+          ((position.market_value_base ?? 0) * fx * myShare(id)) / aggregateNav;
+        if (weight > 0.00001)
+          weights.set(
+            position.security_id,
+            (weights.get(position.security_id) ?? 0) + weight,
+          );
       }
     }
     const zero = new Array(Math.max(calendar.length - 1, 0)).fill(0);
+    let uncovered = 0;
     const components = [...weights].map(([securityId, weight]) => {
       const meta = data.securities.get(securityId);
-      if (!meta || meta.security_id === "CASH_EUR" || (REAL_ASSETS.includes(meta.asset_type) && !meta.risk_proxy)) return { weight, vector: zero };
-      return { weight, vector: vectorFor(securityId, calendar) ?? zero };
+      if (
+        meta &&
+        (meta.security_id === `CASH_${aggregate.currency}` ||
+          (REAL_ASSETS.includes(meta.asset_type) && !meta.risk_proxy))
+      )
+        return { weight, vector: zero };
+      const vector = meta
+        ? vectorFor(securityId, calendar, aggregate.currency)
+        : null;
+      if (!vector) uncovered += weight; // counted as 0 risk, but it does move
+      return { weight, vector: vector ?? zero };
     });
     if (!components.length) continue;
     // Not renormalized: the weights already cover the aggregate (cash at 0), so the % is of the whole aggregate
     const vector = combine(components, calendar.length - 1, false);
-    const record = evaluateRiskSnapshot(vector, calendar, aggregateNavEur, isCrypto ? tails365 : tails252);
+    const record = evaluateRiskSnapshot(
+      vector,
+      calendar,
+      aggregateNav,
+      isCrypto ? tails365 : tails252,
+    );
     if (!record) continue;
+    const total = components.reduce(
+      (sum, component) => sum + component.weight,
+      0,
+    );
+    record.COVERAGE_PCT =
+      total > 0 ? truncate(((total - uncovered) / total) * 100, 2) : 0;
     aggregateRows.push(...toRows(record, aggregate.aggregate_id));
     aggregateCount++;
   }
-  return { securityRows, portfolioRows, aggregateRows, failures, counts: { securities: securityCount, portfolios: portfolioCount, aggregates: aggregateCount } };
+  return {
+    securityRows,
+    portfolioRows,
+    aggregateRows,
+    failures,
+    counts: {
+      securities: securityCount,
+      portfolios: portfolioCount,
+      aggregates: aggregateCount,
+    },
+  };
 }
 
 /** Σ weight x return per session; null when less than half of the weight has a return that session. */
@@ -251,26 +440,36 @@ function combine(components, sessions, renormalize) {
 }
 
 /**
- * Daily EUR return vector of a security on a calendar (length = calendar.length - 1, decimals). The security's own
+ * Daily return vector of a security on a calendar, in a currency (length = calendar.length - 1, decimals). Its own
  * return when it is priced on both days, else its risk proxy's (return level: prices of the two never mixed); null
  * before either ever traded; 0 for up to MAX_MISSING_SESSIONS missing sessions (local holidays); a longer hole throws.
- * Cash / debt / crypto are worth 1 in their own currency: their return is the currency's move against EUR.
+ * Cash / debt / crypto are worth 1 in their own currency: their return is the currency's move against `currency`.
  *
  * @param {Object} meta - security_master row
  * @param {string|null} proxyId - risk_proxy
  * @param {Array<string>} calendar - ISO dates
  * @param {Object} data - { securities, prices }
+ * @param {string} [currency="EUR"] - currency of the returns
  * @returns {Array<number|null>}
  */
-export function buildSecurityDailyVector(meta, proxyId, calendar, data) {
+export function buildSecurityDailyVector(
+  meta,
+  proxyId,
+  calendar,
+  data,
+  currency = "EUR",
+) {
   const eurPrice = (securityId, date) => {
     const security = data.securities.get(securityId);
     if (!security) return null;
-    const price = UNIT_VALUED.includes(security.asset_type) ? 1 : data.prices.get(securityId)?.get(date);
+    const price = UNIT_VALUED.includes(security.asset_type)
+      ? 1
+      : data.prices.get(securityId)?.get(date);
     if (!price || price <= 0) return null;
     let fx = 1;
     try {
-      if (security.currency !== "EUR") fx = currencyConverter(security.currency, "EUR", date);
+      if (security.currency !== currency)
+        fx = currencyConverter(security.currency, currency, date);
     } catch {
       return null; // no rate yet that early (crypto before its first rate): not traded
     }
@@ -301,19 +500,26 @@ export function buildSecurityDailyVector(meta, proxyId, calendar, data) {
       proxyPrevious = proxyNow ?? proxyPrevious;
       missing++;
     } else {
-      throw new Error(`no price for ${meta.security_id} on ${calendar[i]} (${missing + 1} sessions in a row, proxy ${proxy ?? "none"})`);
+      throw new Error(
+        `no price for ${meta.security_id} on ${calendar[i]} (${missing + 1} sessions in a row, proxy ${proxy ?? "none"})`,
+      );
     }
   }
   return vector;
 }
 
-const truncate = (value, decimals) => Math.trunc(value * 10 ** decimals) / 10 ** decimals;
-const mean = (values) => values.reduce((sum, value) => sum + value, 0) / values.length;
+const truncate = (value, decimals) =>
+  Math.trunc(value * 10 ** decimals) / 10 ** decimals;
+const mean = (values) =>
+  values.reduce((sum, value) => sum + value, 0) / values.length;
 // Population standard deviation (GAS calculateStandardDeviation)
 const standardDeviation = (values) => {
   if (!values.length) return 0;
   const average = mean(values);
-  return Math.sqrt(values.reduce((sum, value) => sum + (value - average) ** 2, 0) / values.length);
+  return Math.sqrt(
+    values.reduce((sum, value) => sum + (value - average) ** 2, 0) /
+      values.length,
+  );
 };
 
 /**
@@ -321,29 +527,43 @@ const standardDeviation = (values) => {
  * VOLATILITY_1Y / 5Y, DOWNSIDE_DEV_1Y (annualized), CURRENT_DD (from the all-time peak), MAX_DD_1Y, historical VaR / ES /
  * GaR at 95% over the full history (daily, rolling 5 and 21 sessions), WORST_DAY / WEEK / MONTH, the fixed STRESS_*
  * windows, tail capture ratios against the equity / fixed income / crypto benchmarks' 30 worst sessions (4 decimals),
- * and with a nav the money metrics in EUR. Needs 21 returns for the statistics.
+ * and with a nav the money metrics (<metric>_BASE = nav x %, in the nav's currency). Needs 21 returns for the statistics.
  * GAS: VOLATILITY_5Y was over the whole history (now the last 5 years); a stress window counted sessions without a
- * return as 0% (a security born after it showed a 0 shock: now null below STRESS_MIN_COVERAGE).
+ * return as 0% (a security born after it showed a 0 shock: now null below STRESS_MIN_COVERAGE); the money metrics
+ * were named _EUR whatever the currency (now _BASE).
  *
  * @param {Array<number|null>} vector - daily returns (decimals) on the calendar
  * @param {Array<string>} calendar - ISO dates (vector.length + 1)
- * @param {number|null} navEur - nav in EUR for the _EUR metrics
+ * @param {number|null} nav - nav for the _BASE metrics (in the currency of the returns)
  * @param {Object} tails - { eqTailCluster, fiTailCluster, cryptoTailCluster, isCrypto }
  * @returns {Object|null} metric -> value
  */
-export function evaluateRiskSnapshot(vector, calendar, navEur, tails) {
+export function evaluateRiskSnapshot(vector, calendar, nav, tails) {
   if (!vector || !vector.length) return null;
   const record = {};
   const valid = vector.filter((ret) => ret !== null && !Number.isNaN(ret));
   const annual = tails.isCrypto ? 365 : 252;
   if (valid.length >= 21) {
     const last1Y = valid.slice(-annual);
-    record.VOLATILITY_1Y = truncate(standardDeviation(last1Y) * 100 * Math.sqrt(annual), 2);
-    record.VOLATILITY_5Y = truncate(standardDeviation(valid.slice(-5 * annual)) * 100 * Math.sqrt(annual), 2);
-    record.DOWNSIDE_DEV_1Y = truncate(downsideDeviation(last1Y) * 100 * Math.sqrt(annual), 2);
+    record.VOLATILITY_1Y = truncate(
+      standardDeviation(last1Y) * 100 * Math.sqrt(annual),
+      2,
+    );
+    record.VOLATILITY_5Y = truncate(
+      standardDeviation(valid.slice(-5 * annual)) * 100 * Math.sqrt(annual),
+      2,
+    );
+    record.DOWNSIDE_DEV_1Y = truncate(
+      downsideDeviation(last1Y) * 100 * Math.sqrt(annual),
+      2,
+    );
     record.CURRENT_DD = truncate(drawdowns(valid).current * 100, 2);
     record.MAX_DD_1Y = truncate(drawdowns(last1Y).max * 100, 2);
-    for (const [label, series] of [["DLY", valid], ["WKL", rollingCompounded(valid, 5)], ["MTH", rollingCompounded(valid, 21)]]) {
+    for (const [label, series] of [
+      ["DLY", valid],
+      ["WKL", rollingCompounded(valid, 5)],
+      ["MTH", rollingCompounded(valid, 21)],
+    ]) {
       const tail = tailMetrics(series, 0.95);
       record[`VAR_${label}_95`] = truncate(tail.var * 100, 2);
       record[`ES_${label}_95`] = truncate(tail.es * 100, 2);
@@ -351,16 +571,25 @@ export function evaluateRiskSnapshot(vector, calendar, navEur, tails) {
     }
   }
   const worst = worstRollingWindows(valid);
-  for (const key of ["WORST_DAY", "WORST_WEEK", "WORST_MONTH"]) if (worst[key] !== null) record[key] = truncate(worst[key] * 100, 2);
+  for (const key of ["WORST_DAY", "WORST_WEEK", "WORST_MONTH"])
+    if (worst[key] !== null) record[key] = truncate(worst[key] * 100, 2);
   for (const [key, [start, end]] of Object.entries(STRESS_SCENARIOS)) {
     const shock = historicalShock(vector, calendar, start, end);
     if (shock !== null) record[key] = truncate(shock * 100, 2);
   }
-  for (const [key, cluster] of [["EQUITY_TAIL_CAPTURE", tails.eqTailCluster], ["CRYPTO_TAIL_CAPTURE", tails.cryptoTailCluster], ["FI_TAIL_CAPTURE", tails.fiTailCluster]]) {
+  for (const [key, cluster] of [
+    ["EQUITY_TAIL_CAPTURE", tails.eqTailCluster],
+    ["CRYPTO_TAIL_CAPTURE", tails.cryptoTailCluster],
+    ["FI_TAIL_CAPTURE", tails.fiTailCluster],
+  ]) {
     const capture = cluster ? tailCapture(vector, calendar, cluster) : null;
-    if (capture !== null && !Number.isNaN(capture)) record[key] = truncate(capture, 4);
+    if (capture !== null && !Number.isNaN(capture))
+      record[key] = truncate(capture, 4);
   }
-  if (navEur > 0) for (const key of EUR_METRICS) if (record[key] !== undefined) record[`${key}_EUR`] = Number(((navEur * record[key]) / 100).toFixed(2));
+  if (nav > 0)
+    for (const key of MONEY_METRICS)
+      if (record[key] !== undefined)
+        record[`${key}_BASE`] = Number(((nav * record[key]) / 100).toFixed(2));
   return record;
 }
 
@@ -377,12 +606,15 @@ function historicalShock(vector, calendar, start, end) {
     wealth *= 1 + vector[i];
     known++;
   }
-  return sessions && known / sessions >= STRESS_MIN_COVERAGE ? wealth - 1 : null;
+  return sessions && known / sessions >= STRESS_MIN_COVERAGE
+    ? wealth - 1
+    : null;
 }
 
 /** Worst 1 / 5 / 21-session compounded returns (sessions without a return dropped). */
 function worstRollingWindows(valid) {
-  if (!valid.length) return { WORST_DAY: null, WORST_WEEK: null, WORST_MONTH: null };
+  if (!valid.length)
+    return { WORST_DAY: null, WORST_WEEK: null, WORST_MONTH: null };
   const worstOver = (size) => {
     if (valid.length < size) return null;
     let product = valid.slice(0, size).reduce((acc, ret) => acc * (1 + ret), 1);
@@ -393,17 +625,26 @@ function worstRollingWindows(valid) {
     }
     return worst;
   };
-  return { WORST_DAY: Math.min(...valid), WORST_WEEK: worstOver(5), WORST_MONTH: worstOver(21) };
+  return {
+    WORST_DAY: Math.min(...valid),
+    WORST_WEEK: worstOver(5),
+    WORST_MONTH: worstOver(21),
+  };
 }
 
 /** The benchmark's `count` worst sessions: { dates, avgLoss }. */
 function extractBenchmarkTailCluster(vector, calendar, count) {
   if (!vector || !vector.length) return null;
-  const sessions = vector.map((ret, i) => ({ date: calendar[i + 1], ret })).filter((session) => session.ret !== null && !Number.isNaN(session.ret));
+  const sessions = vector
+    .map((ret, i) => ({ date: calendar[i + 1], ret }))
+    .filter((session) => session.ret !== null && !Number.isNaN(session.ret));
   sessions.sort((a, b) => a.ret - b.ret);
   const worst = sessions.slice(0, Math.min(count, sessions.length));
   if (!worst.length) return null;
-  return { dates: new Set(worst.map((session) => session.date)), avgLoss: mean(worst.map((session) => session.ret)) };
+  return {
+    dates: new Set(worst.map((session) => session.date)),
+    avgLoss: mean(worst.map((session) => session.ret)),
+  };
 }
 
 /** Average return on the benchmark's worst sessions / the benchmark's average loss there (needs 5 of them). */
@@ -412,7 +653,12 @@ function tailCapture(vector, calendar, cluster, minOverlap = 5) {
   let sum = 0;
   let matches = 0;
   for (let i = 0; i < vector.length; i++) {
-    if (vector[i] === null || Number.isNaN(vector[i]) || !cluster.dates.has(calendar[i + 1])) continue;
+    if (
+      vector[i] === null ||
+      Number.isNaN(vector[i]) ||
+      !cluster.dates.has(calendar[i + 1])
+    )
+      continue;
     sum += vector[i];
     matches++;
   }
@@ -426,12 +672,19 @@ function tailMetrics(returns, confidence) {
   const n = sorted.length;
   const varIndex = Math.min(Math.floor((1 - confidence) * n), n - 1);
   const tail = sorted.slice(0, varIndex + 1);
-  return { var: sorted[varIndex], es: mean(tail), gar: sorted[Math.min(Math.floor(confidence * n), n - 1)] };
+  return {
+    var: sorted[varIndex],
+    es: mean(tail),
+    gar: sorted[Math.min(Math.floor(confidence * n), n - 1)],
+  };
 }
 
 function rollingCompounded(valid, size) {
   const rolling = [];
-  for (let i = size; i <= valid.length; i++) rolling.push(valid.slice(i - size, i).reduce((acc, ret) => acc * (1 + ret), 1) - 1);
+  for (let i = size; i <= valid.length; i++)
+    rolling.push(
+      valid.slice(i - size, i).reduce((acc, ret) => acc * (1 + ret), 1) - 1,
+    );
   return rolling;
 }
 
@@ -447,5 +700,8 @@ function drawdowns(valid) {
 
 function downsideDeviation(returns) {
   if (returns.length < 2) return 0;
-  return Math.sqrt(returns.reduce((acc, ret) => acc + Math.min(0, ret) ** 2, 0) / (returns.length - 1));
+  return Math.sqrt(
+    returns.reduce((acc, ret) => acc + Math.min(0, ret) ** 2, 0) /
+      (returns.length - 1),
+  );
 }
