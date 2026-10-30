@@ -51,7 +51,25 @@ const EVENT_HANDLERS = {
   BALANCE: forceCashBalance,
   MATURED_SECURITY: replaceMaturedSecurity,
   RECURRING_PAYMENT: processRecurringPayment,
+  TAX_PAID: recordTaxPayment,
 };
+
+/**
+ * TAX_PAID -> tax_payments: the declared tax of a year (capital gains + IVAFE through the tax return) is paid, on the
+ * event's date, from portfolio_id. tax_year from event_metadata.tax_year, else the year before the payment. quantity =
+ * the amount actually paid if known (0 = unknown): only kept for reference, REALIZED_TAX drops the whole estimate.
+ * Not a ledger row: the paying account's balance shows the money leaving (user, 2026-10-30).
+ */
+async function recordTaxPayment(event) {
+  const paidOn = effectiveDate(event);
+  const taxYear = Number(event.event_metadata?.tax_year ?? Number(paidOn.slice(0, 4)) - 1);
+  await replaceDataInDb(
+    [{ tax_year: taxYear, paid_on: paidOn, amount_eur: Number(event.quantity) || null, portfolio_id: event.portfolio_id, event_id: event.event_id, notes: event.event_notes ?? null }],
+    "tax_payments",
+  );
+  console.log(`[EVENTS] Tax year ${taxYear} paid on ${paidOn} (event ${event.event_id}).`);
+  return true;
+}
 
 /** The date the event takes effect: process_date if set, else date (GAS: PROCESS_DATE !== "" ? PROCESS_DATE : DATE). */
 function effectiveDate(event) {

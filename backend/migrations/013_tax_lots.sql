@@ -8,7 +8,8 @@
 --    rows are kept (BINANCE_FUTURES, computed by hand in GAS).
 --    The cost of a sale (cost_method): weighted average cost for securities (art. 68 c.6 TUIR, what the brokers
 --    withhold on), LIFO for crypto; taxes.js keeps one lot per purchase in memory only.
--- 4. tax_items: per tax year and portfolio, REDDITI_* / REALIZED / UNREALIZED / IVAFE / estimates, rebuilt nightly.
+-- 4. tax_items: per tax year (or flow block) and portfolio, REDDITI_* / REALIZED / UNREALIZED / IVAFE / estimates,
+--    rebuilt nightly.
 
 CREATE TABLE IF NOT EXISTS public.lot_transfers (
     assetout_flow_id BIGINT NOT NULL REFERENCES public.capital_flows(capital_flow_id) ON DELETE CASCADE,
@@ -71,13 +72,17 @@ CREATE TABLE IF NOT EXISTS public.closed_lots (
     CONSTRAINT chk_closed_lots_source CHECK (source IN ('ENGINE', 'MANUAL'))
 );
 
+-- tax_items: start_date / end_date = the year (Jan 1 - Dec 31), or for the IVAFE portfolios' START / MAX / END_NAV and
+-- DAYS_HELD the flow block (split at every CASHIN / CASHOUT / ASSETIN / ASSETOUT: the commercialista's RW periods)
 CREATE TABLE IF NOT EXISTS public.tax_items (
     tax_year INTEGER NOT NULL,
     portfolio_id TEXT NOT NULL REFERENCES public.portfolios(portfolio_id) ON DELETE CASCADE,
     item TEXT NOT NULL,
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
     value_eur NUMERIC NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT pk_tax_items PRIMARY KEY (tax_year, portfolio_id, item)
+    CONSTRAINT pk_tax_items PRIMARY KEY (tax_year, portfolio_id, item, start_date)
 );
 
 -- RLS like every other table (001): the engine (postgres) bypasses it, the API needs an authenticated user

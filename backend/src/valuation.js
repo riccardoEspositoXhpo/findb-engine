@@ -533,7 +533,8 @@ export async function runCustom(portfolio, dateStr) {
     case "TRADE_REPUBLIC":
       return runTradeRepublic(portfolio, dateStr);
     case "UNREALIZED_TAX":
-      console.log(`[VALUATION] UNREALIZED_TAX: valued by taxes.run after valuation.`);
+    case "REALIZED_TAX":
+      console.log(`[VALUATION] ${portfolio.portfolio_id}: valued by taxes.run after valuation.`);
       return false;
     default:
       console.warn(

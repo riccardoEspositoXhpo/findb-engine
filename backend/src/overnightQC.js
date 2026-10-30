@@ -976,7 +976,7 @@ export async function checkNavJumps(targetDate = new Date()) {
     `WITH series AS (
        SELECT n.portfolio_id, n.date, n.nav, LAG(n.nav) OVER w AS prev_nav, LAG(n.date) OVER w AS prev_date
        FROM nav n JOIN portfolios f USING (portfolio_id)
-       WHERE f.valuation_method IN ('ROLL', 'CUSTOM') AND f.portfolio_id <> 'UNREALIZED_TAX'
+       WHERE f.valuation_method IN ('ROLL', 'CUSTOM') AND f.portfolio_id NOT IN ('UNREALIZED_TAX', 'REALIZED_TAX')
        WINDOW w AS (PARTITION BY n.portfolio_id ORDER BY n.date)
      )
      SELECT s.portfolio_id, f.portfolio_type, s.date::text, s.prev_date::text, s.nav::float, s.prev_nav::float,
@@ -1337,6 +1337,29 @@ export async function hasPerformanceRunToday(targetDate = new Date()) {
   });
 }
 
+/**
+ * T6: from November, last year's declared tax (DICHIARATIVO capital gains + IVAFE, in tax_items) has a tax_payments row
+ * (TAX_PAID event), else REALIZED_TAX keeps it as owed: was the payment not recorded?
+ */
+export async function checkTaxPaid(targetDate = new Date()) {
+  const dateStr = utils.formatDateToISO(targetDate);
+  const year = Number(dateStr.slice(0, 4)) - 1;
+  const { rows } = Number(dateStr.slice(5, 7)) < 11 ? { rows: [] } : await query(
+    `SELECT t.tax_year, round(sum(t.value_eur)::numeric, 2)::float AS owed_eur
+     FROM tax_items t JOIN portfolios p USING (portfolio_id)
+     WHERE t.tax_year = $1 AND ((t.item = 'TAX_EST' AND p.fiscal_regime LIKE 'DICHIARATIVO%') OR (t.item = 'IVAFE_EST' AND p.ivafe_taxable))
+       AND NOT EXISTS (SELECT 1 FROM tax_payments x WHERE x.tax_year = t.tax_year)
+     GROUP BY 1 HAVING sum(t.value_eur) > 0;`,
+    [year],
+  );
+  return qcResult("checkTaxPaid", dateStr, rows, {
+    severity: "WARNING",
+    ok: "Last year's declared tax is marked as paid (or nothing is owed).",
+    fail: () => `Tax year ${year} is not marked as paid.`,
+    message: "Declared tax still owed in REALIZED_TAX: add a TAX_PAID event when it is paid:",
+  });
+}
+
 export const overnightQC = {
   hasCryptoRunToday,
   hasFxRunToday,
@@ -1371,6 +1394,7 @@ export const overnightQC = {
   checkPerformanceJumps,
   checkTradeSpikes,
   hasPerformanceRunToday,
+  checkTaxPaid,
   runAll,
 };
 
@@ -1415,6 +1439,8 @@ async function runAll(targetDate = new Date()) {
     checkPerformanceResiduals(targetDate),
     checkPerformanceJumps(targetDate),
     checkTradeSpikes(targetDate),
+    // taxes
+    checkTaxPaid(targetDate),
   ]);
 
   return { results };

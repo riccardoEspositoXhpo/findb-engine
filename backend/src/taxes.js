@@ -2,7 +2,7 @@ import { utils } from "./utils.js";
 import { query, replaceDataInDb, withSavepoint } from "./db.js";
 import { loadFxRates, currencyConverter } from "./marketData.js";
 import { OUTFLOW_TYPES } from "./ledger.js";
-import { runOneLinePortfolio, isPortfolioActive } from "./valuation.js";
+import { isPortfolioActive } from "./valuation.js";
 
 export const taxes = {
   run,
@@ -21,15 +21,14 @@ const COST_AT_TRANSFER_FROM = ["AWARDS_UNVESTED"];
 const CLASSIC_INCOME = ["DIVIDEND", "COUPON", "INTEREST"];
 // GAS CRYPTO_INCOME; REWARDS (card cashback) are left out
 const CRYPTO_INCOME = ["STAKING", "EARN"];
-// Pensions: flat estimate on the gain (GAS calculateTaxFromGain), in %; other pensions 0
-const PENSION_RATES = { AEGON: 43, ALLIANZ: 9 };
 const cryptoRate = (year) => (year >= 2026 ? 33 : 26);
 const EPS = 1e-9;
 
 /**
  * Nightly tax step, after valuation (needs today's positions): lots from the whole ledger (open_lots: one row per
- * holding, closed_lots ENGINE rows: one per sale), yearly tax items (tax_items), and the UNREALIZED_TAX portfolio for
- * the day (one negative DEBT_EUR line = Σ est_tax_eur of the open lots).
+ * holding, closed_lots ENGINE rows: one per sale), tax items per year / flow block (tax_items), and the whole history
+ * of two tax portfolios (one negative DEBT_EUR line a day): UNREALIZED_TAX = Σ est_tax_eur of the open lots that day,
+ * REALIZED_TAX = declared tax owed and not yet paid (tax_payments).
  * Migrated from positionLotCalculator + runTaxLots + runUnrealizedTax in // taxCalculations.gs, portfolioData.gs
  *
  * @param {Date|string} [targetDate=new Date()]
@@ -40,7 +39,7 @@ export async function run(targetDate = new Date()) {
   console.log(`[TAXES] Starting position lots + tax items for ${dateStr}...`);
   await loadFxRates();
 
-  const lots = await computeLots(dateStr);
+  const lots = await computeLots(dateStr, { history: true });
   await withSavepoint(async () => {
     await query(`DELETE FROM open_lots;`);
     await query(`DELETE FROM closed_lots WHERE source = 'ENGINE';`);
@@ -48,19 +47,43 @@ export async function run(targetDate = new Date()) {
     await replaceDataInDb(lots.closedLots, "closed_lots");
   });
 
-  const { items, unrealizedTax } = await computeTaxItems(dateStr, lots);
+  const { items, unrealizedTax, inputs } = await computeTaxItems(dateStr, lots);
   await withSavepoint(async () => {
     await query(`DELETE FROM tax_items;`);
     await replaceDataInDb(items, "tax_items");
   });
 
-  const { rows } = await query(`SELECT * FROM portfolios WHERE portfolio_id = 'UNREALIZED_TAX';`);
-  if (rows[0] && isPortfolioActive(rows[0], dateStr)) await runOneLinePortfolio(rows[0], "DEBT_EUR", 1, -unrealizedTax, dateStr);
+  // UNREALIZED_TAX / REALIZED_TAX: their whole history every night (upserts: only the days whose value changed get a
+  // new created_at, so aggregates and performance restart only from a real change)
+  const { rows: payments } = await query(`SELECT tax_year, paid_on::text AS paid_on FROM tax_payments;`);
+  const realizedHistory = new Map();
+  for (let day = `${FIRST_TAX_YEAR}-01-01`; day <= dateStr; day = utils.addDays(day, 1)) realizedHistory.set(day, realizedTaxOwed(inputs, day, payments));
+  const realizedTax = realizedHistory.get(dateStr) ?? 0;
+  await writeTaxPortfolio("UNREALIZED_TAX", lots.unrealizedHistory);
+  await writeTaxPortfolio("REALIZED_TAX", realizedHistory);
 
   const findings = {};
   for (const finding of lots.findings) findings[finding.type] = (findings[finding.type] ?? 0) + 1;
-  console.log(`[TAXES] Done: ${lots.openLots.length} open lots, ${lots.closedLots.length} closed lots, ${items.length} tax items, unrealized tax ${unrealizedTax.toFixed(2)} EUR. Findings: ${JSON.stringify(findings)}`);
-  return { openLots: lots.openLots.length, closedLots: lots.closedLots.length, taxItems: items.length, unrealizedTax, findings };
+  console.log(`[TAXES] Done: ${lots.openLots.length} open lots, ${lots.closedLots.length} closed lots, ${items.length} tax items, unrealized tax ${unrealizedTax.toFixed(2)} EUR, realized tax owed ${realizedTax.toFixed(2)} EUR. Findings: ${JSON.stringify(findings)}`);
+  return { openLots: lots.openLots.length, closedLots: lots.closedLots.length, taxItems: items.length, unrealizedTax, realizedTax, findings };
+}
+
+/** One negative DEBT_EUR line a day (date -> tax in EUR) for a tax portfolio, from its inception (closed: to its end). */
+async function writeTaxPortfolio(portfolioId, series) {
+  const { rows } = await query(`SELECT * FROM portfolios WHERE portfolio_id = $1;`, [portfolioId]);
+  if (!rows[0]) return;
+  const positionRows = [];
+  const navRows = [];
+  for (const [date, tax] of series) {
+    if (!isPortfolioActive(rows[0], date)) continue;
+    const value = -Number(tax.toFixed(2));
+    positionRows.push({ date, portfolio_id: portfolioId, security_id: "DEBT_EUR", quantity: value, price: 1, market_value_local: value, market_value_base: value, market_value_eur: value, weight: 100 });
+    navRows.push({ date, portfolio_id: portfolioId, nav: value, nav_eur: value });
+  }
+  await withSavepoint(async () => {
+    await replaceDataInDb(positionRows, "positions");
+    await replaceDataInDb(navRows, "nav");
+  });
 }
 
 /**
@@ -91,7 +114,7 @@ export async function run(targetDate = new Date()) {
  * @param {string} dateStr - ISO date, last ledger day
  * @returns {Promise<{openLots: Array, closedLots: Array, findings: Array, securities: Map, portfolios: Map}>}
  */
-export async function computeLots(dateStr) {
+export async function computeLots(dateStr, { history = false } = {}) {
   const { rows: securityRows } = await query(`SELECT security_id, currency, asset_type, asset_classification FROM security_master;`);
   const securities = new Map(securityRows.map((row) => [row.security_id, row]));
   const { rows: currencyRows } = await query(`SELECT currency_code, type FROM currencies;`);
@@ -106,13 +129,14 @@ export async function computeLots(dateStr) {
     const rate = currencyConverter(currency, "EUR", date);
     return rate === null || amount === null ? null : amount * rate;
   };
-  // Tax rate (%) of a gain on a lot in a year: none before residency; pensions flat; real assets 0; crypto; 12.5%
-  // government bonds; 26% otherwise
+  // Capital gain tax rate (%) of a holding in a year (user, 2026-10-30): only portfolios with a fiscal_regime are
+  // taxed on their gains (no regime -> null: pensions are taxed as income at payout, real assets, liabilities); none
+  // before residency; real assets 0; crypto; 12.5% government bonds; 26% otherwise
   const taxRate = (portfolioId, securityId, year) => {
     const portfolio = portfolios.get(portfolioId);
     const security = securities.get(securityId);
+    if (!portfolio?.fiscal_regime) return null;
     if (year < FIRST_TAX_YEAR) return 0;
-    if (portfolio?.portfolio_type === "Pension") return PENSION_RATES[portfolioId] ?? 0;
     if (["REAL_ASSET", "REAL_ESTATE"].includes(security?.asset_type)) return 0;
     if (security?.asset_type === "CRYPTO") return cryptoRate(year);
     return /Government/i.test(security?.asset_classification ?? "") ? 12.5 : 26;
@@ -212,7 +236,68 @@ export async function computeLots(dateStr) {
   };
   const sum = (pieces, key) => pieces.reduce((total, piece) => (total === null || piece[key] === null ? null : total + piece[key]), 0);
 
+  // One open lot per holding valued at a position (share of it by quantity), as of a date
+  const holdingRow = (asOf, portfolioId, securityId, lots, position) => {
+    const quantity = lots.reduce((total, lot) => total + lot.quantity, 0);
+    if (quantity <= 1e-8) return null;
+    const origBase = sum(lots, "orig_value_base");
+    const origEur = sum(lots, "orig_value_eur");
+    const share = position?.quantity ? quantity / position.quantity : null;
+    const currentBase = share === null ? null : position.market_value_base * share;
+    const currentEur = share === null ? null : position.market_value_eur * share;
+    const pnlBase = currentBase === null || origBase === null ? null : currentBase - origBase;
+    const pnlEur = currentEur === null || origEur === null ? null : currentEur - origEur;
+    const rate = taxRate(portfolioId, securityId, Number(asOf.slice(0, 4)));
+    return {
+      date: asOf, portfolio_id: portfolioId, security_id: securityId, cost_method: costMethod(securityId), quantity,
+      orig_price: origBase === null ? null : origBase / quantity, orig_value_base: origBase, orig_value_eur: origEur,
+      current_price: currentBase === null ? null : currentBase / quantity, current_value_base: currentBase, current_value_eur: currentEur,
+      unrealized_pnl_base: pnlBase, unrealized_pnl_eur: pnlEur,
+      unrealized_return_pct: pnlBase === null || !origBase ? null : (pnlBase / origBase) * 100,
+      // The whole holding sold today: the gain net of its losing purchases
+      tax_rate: rate, est_tax_eur: pnlEur === null || rate === null ? null : (Math.max(pnlEur, 0) * rate) / 100,
+    };
+  };
+
+  // history: the estimated tax on the open lots at the end of every day from the first operation (UNREALIZED_TAX
+  // series), each day valued at every portfolio's latest positions on or before it
+  const unrealizedHistory = new Map();
+  let snapshotDay = null;
+  let takeSnapshot = () => {};
+  if (history && operations.length) {
+    const { rows: positionRows } = await query(
+      `SELECT portfolio_id, date::text AS date, security_id, quantity::float, market_value_base::float, market_value_eur::float FROM positions WHERE date <= $1 ORDER BY portfolio_id, date;`,
+      [dateStr],
+    );
+    const days = new Map(); // portfolio -> [[date, Map(security -> position)]] ascending
+    for (const row of positionRows) {
+      const series = days.get(row.portfolio_id) ?? days.set(row.portfolio_id, []).get(row.portfolio_id);
+      if (series.at(-1)?.[0] !== row.date) series.push([row.date, new Map()]);
+      series.at(-1)[1].set(row.security_id, row);
+    }
+    const pointer = new Map();
+    snapshotDay = operations[0].date;
+    takeSnapshot = (upTo) => {
+      for (; snapshotDay < upTo && snapshotDay <= dateStr; snapshotDay = utils.addDays(snapshotDay, 1)) {
+        let tax = 0;
+        for (const [key, lots] of book) {
+          if (!lots.length) continue;
+          const [portfolioId, securityId] = key.split("|");
+          const closed = portfolios.get(portfolioId).closed_date;
+          if (closed && utils.formatDateToISO(closed) < snapshotDay) continue;
+          const series = days.get(portfolioId) ?? [];
+          let index = pointer.get(portfolioId) ?? -1;
+          while (index + 1 < series.length && series[index + 1][0] <= snapshotDay) index++;
+          pointer.set(portfolioId, index);
+          tax += holdingRow(snapshotDay, portfolioId, securityId, lots, index >= 0 ? series[index][1].get(securityId) : null)?.est_tax_eur ?? 0;
+        }
+        unrealizedHistory.set(snapshotDay, tax);
+      }
+    };
+  }
+
   for (const op of operations) {
+    if (snapshotDay && op.date > snapshotDay) takeSnapshot(op.date);
     const portfolio = portfolios.get(op.portfolio_id);
     if (op.flow) {
       if (isCashLike(op.security_id) || !op.quantity) continue;
@@ -294,6 +379,8 @@ export async function computeLots(dateStr) {
     if (op.fee && op.fee_currency && !isCashLike(securityFor(op.fee_currency))) consume(op.portfolio_id, securityFor(op.fee_currency), op.fee, op.date, "FEE");
   }
 
+  if (snapshotDay) takeSnapshot(utils.addDays(dateStr, 1));
+
   // One open lot per holding, valued at the latest positions on or before dateStr (share of the position by quantity)
   const { rows: latest } = await query(
     `SELECT DISTINCT ON (p.portfolio_id, p.security_id) p.portfolio_id, p.security_id, p.quantity::float, p.market_value_base::float, p.market_value_eur::float
@@ -303,34 +390,15 @@ export async function computeLots(dateStr) {
     [dateStr],
   );
   const positions = new Map(latest.map((row) => [`${row.portfolio_id}|${row.security_id}`, row]));
-  const year = Number(dateStr.slice(0, 4));
   const openLots = [];
   for (const [key, lots] of book) {
     const [portfolioId, securityId] = key.split("|");
     // A closed portfolio holds nothing: what its lots still show is dust (BINANCE_SPOT ETH 0.0002)
     if (portfolios.get(portfolioId).closed_date) continue;
-    const position = positions.get(key);
-    const quantity = lots.reduce((total, lot) => total + lot.quantity, 0);
-    if (quantity <= 1e-8) continue;
-    const origBase = sum(lots, "orig_value_base");
-    const origEur = sum(lots, "orig_value_eur");
-    const share = position?.quantity ? quantity / position.quantity : null;
-    const currentBase = share === null ? null : position.market_value_base * share;
-    const currentEur = share === null ? null : position.market_value_eur * share;
-    const pnlBase = currentBase === null || origBase === null ? null : currentBase - origBase;
-    const pnlEur = currentEur === null || origEur === null ? null : currentEur - origEur;
-    const rate = taxRate(portfolioId, securityId, year);
-    openLots.push({
-      date: dateStr, portfolio_id: portfolioId, security_id: securityId, cost_method: costMethod(securityId), quantity,
-      orig_price: origBase === null ? null : origBase / quantity, orig_value_base: origBase, orig_value_eur: origEur,
-      current_price: currentBase === null ? null : currentBase / quantity, current_value_base: currentBase, current_value_eur: currentEur,
-      unrealized_pnl_base: pnlBase, unrealized_pnl_eur: pnlEur,
-      unrealized_return_pct: pnlBase === null || !origBase ? null : (pnlBase / origBase) * 100,
-      // The whole holding sold today: the gain net of its losing purchases
-      tax_rate: rate, est_tax_eur: pnlEur === null ? null : (Math.max(pnlEur, 0) * rate) / 100,
-    });
+    const row = holdingRow(dateStr, portfolioId, securityId, lots, positions.get(key));
+    if (row) openLots.push(row);
   }
-  return { openLots, closedLots, findings, securities, portfolios };
+  return { openLots, closedLots, findings, securities, portfolios, unrealizedHistory };
 }
 
 /**
@@ -373,40 +441,98 @@ async function pairTransfers(flows) {
 
 /**
  * Tax items per year (from FIRST_TAX_YEAR) and portfolio, in EUR, from the closed lots (ENGINE + MANUAL, one result
- * per sale_id), the income flows, the navs and the open lots:
+ * per sale_id), the income flows, the navs and the open lots (loadTaxInputs + taxItemsAsOf).
+ *
+ * @param {string} dateStr - ISO date
+ * @param {Object} lots - computeLots result
+ * @returns {Promise<{items: Array, unrealizedTax: number, inputs: Object}>}
+ */
+export async function computeTaxItems(dateStr, lots) {
+  const inputs = await loadTaxInputs(dateStr, lots);
+  return { ...taxItemsAsOf(inputs, dateStr, lots.openLots), inputs };
+}
+
+/** Everything the tax items read, loaded once (so they can be computed as of any day: REALIZED_TAX history). */
+async function loadTaxInputs(dateStr, lots) {
+  const { securities, portfolios } = lots;
+  const { rows: closedLots } = await query(
+    `SELECT sale_date::text AS sale_date, portfolio_id, security_id, sale_id, realized_pnl_base::float, taxable_gain_eur::float, tax_rate::float
+     FROM closed_lots WHERE sale_date <= $1 ORDER BY sale_date;`,
+    [dateStr],
+  );
+  const { rows: income } = await query(
+    `SELECT date::text AS date, portfolio_id, capital_flow_type, market_value_eur::float AS eur FROM capital_flows
+     WHERE capital_flow_type = ANY($1) AND date <= $2;`,
+    [[...CLASSIC_INCOME, ...CRYPTO_INCOME], dateStr],
+  );
+  const { rows: withheld } = await query(
+    `SELECT date::text AS date, portfolio_id, market_value_eur::float AS eur FROM capital_flows WHERE capital_flow_type = 'CAPITAL_GAIN_TAX' AND date <= $1;`,
+    [dateStr],
+  );
+  // IVAFE portfolios: daily navs (EUR) and the days money moved in / out (flow blocks)
+  const ivafeIds = [...portfolios.values()].filter((portfolio) => portfolio.ivafe_taxable).map((portfolio) => portfolio.portfolio_id);
+  const { rows: navRows } = await query(
+    `SELECT portfolio_id, date::text AS date, nav_eur::float FROM nav WHERE portfolio_id = ANY($1) AND date <= $2 ORDER BY portfolio_id, date;`,
+    [ivafeIds, dateStr],
+  );
+  const navs = new Map(ivafeIds.map((id) => [id, []]));
+  for (const row of navRows) navs.get(row.portfolio_id).push([row.date, row.nav_eur]);
+  const { rows: flowRows } = await query(
+    `SELECT portfolio_id, date::text AS date, sum(CASE WHEN capital_flow_type IN ('CASHIN', 'ASSETIN') THEN market_value_eur ELSE -market_value_eur END)::float AS net_eur
+     FROM capital_flows WHERE portfolio_id = ANY($1) AND date <= $2 AND capital_flow_type IN ('CASHIN', 'CASHOUT', 'ASSETIN', 'ASSETOUT') GROUP BY 1, 2;`,
+    [ivafeIds, dateStr],
+  );
+  const flows = new Map(ivafeIds.map((id) => [id, new Map()]));
+  for (const row of flowRows) flows.get(row.portfolio_id).set(row.date, row.net_eur);
+  return { securities, portfolios, sales: closedLots, income, withheld, navs, flows };
+}
+
+/** Latest [date, value] value on or before a date in an ascending series (binary search), null before the first. */
+function valueOn(series, date) {
+  let [low, high, found] = [0, series.length - 1, null];
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (series[mid][0] <= date) {
+      found = series[mid][1];
+      low = mid + 1;
+    } else high = mid - 1;
+  }
+  return found;
+}
+
+/**
+ * The tax items as known on asOf (sales, income and navs up to it; the current year is partial):
  * - REDDITI_DA_CAPITALE: ETF / FUND gains + classic income (Traditional Investment)
  * - REDDITI_DIVERSI: ETF / FUND losses + every other non-crypto result (no income: GAS added it, but income is
  *   reddito di capitale, art. 44 TUIR)
  * - REDDITI_CRIPTO_ATTIVITA: crypto gains + crypto income (Cryptocurrency Investment). Crypto losses offset nothing
  *   (user), so each sale counts only when positive
- * - REALIZED_PNL_BASE (every year, portfolio currency), UNREALIZED_PNL + UNREALIZED_TAX_EST (open lots on dateStr)
- * - TAX_EST: tax_rate of the lots, crypto 26% / 33% from 2026; REDDITI_DIVERSI net of the losses of the same year and
+ * - REALIZED_PNL_BASE (every year, portfolio currency), UNREALIZED_PNL + UNREALIZED_TAX_EST (open lots, asOf only)
+ * - TAX_EST: tax_rate of the sales, crypto 26% / 33% from 2026; REDDITI_DIVERSI net of the losses of the same year and
  *   the last 4 (per portfolio for AMMINISTRATO, pooled per regime otherwise) -> MINUS_CARRIED;
  *   CAPITAL_GAIN_TAX_WITHHELD (what the broker withheld) next to it
- * - IVAFE_TAXABLE portfolios: START_NAV / MAX_NAV / END_NAV / DAYS_HELD + IVAFE_EST (0.2% x end value x days / 365,
- *   34.20 a year for cash accounts)
+ * - IVAFE_TAXABLE portfolios, per flow block (user: the commercialista's RW periods, split at every CASHIN / CASHOUT /
+ *   ASSETIN / ASSETOUT): START_NAV (with the flow that opens the block), MAX_NAV, END_NAV (without the flow that closes
+ *   it), DAYS_HELD; IVAFE_EST per year = Σ blocks 0.2% x END_NAV x days / 365 (34.20 a year for cash accounts)
+ * Every item has start_date / end_date: the year (Jan 1 - Dec 31), or the block.
  *
- * @param {string} dateStr - ISO date
- * @param {Object} lots - computeLots result
- * @returns {Promise<{items: Array, unrealizedTax: number}>}
+ * @param {Object} inputs - loadTaxInputs
+ * @param {string} asOf - ISO date
+ * @param {Array} [openLots=[]] - open lots valued on asOf (for the UNREALIZED_* items)
+ * @returns {{items: Array, unrealizedTax: number}}
  */
-export async function computeTaxItems(dateStr, lots) {
-  const { openLots, securities, portfolios } = lots;
-  const { rows: closedLots } = await query(
-    `SELECT sale_date::text AS sale_date, portfolio_id, security_id, sale_id, realized_pnl_base::float,
-            taxable_gain_eur::float, tax_rate::float
-     FROM closed_lots WHERE sale_date <= $1;`,
-    [dateStr],
-  );
+function taxItemsAsOf(inputs, asOf, openLots = []) {
+  const { securities, portfolios } = inputs;
   const items = [];
-  const add = (year, portfolioId, item, value) => {
-    if (value && Math.abs(value) > 0.005) items.push({ tax_year: year, portfolio_id: portfolioId, item, value_eur: Number(value.toFixed(2)) });
+  const add = (year, portfolioId, item, value, start = `${year}-01-01`, end = `${year}-12-31`) => {
+    if (value && Math.abs(value) > 0.005) items.push({ tax_year: year, portfolio_id: portfolioId, item, start_date: start, end_date: end, value_eur: Number(value.toFixed(2)) });
   };
   const assetType = (securityId) => securities.get(securityId)?.asset_type;
 
   // One result per sale
   const sales = new Map();
-  closedLots.forEach((lot) => {
+  for (const lot of inputs.sales) {
+    if (lot.sale_date > asOf) break;
     const key = `${lot.portfolio_id}|${lot.sale_id}`;
     const sale = sales.get(key) ?? sales.set(key, { ...lot, realized_pnl_base: 0, taxable_gain_eur: 0, tax: 0 }).get(key);
     sale.realized_pnl_base += lot.realized_pnl_base ?? 0;
@@ -415,7 +541,7 @@ export async function computeTaxItems(dateStr, lots) {
       sale.taxable_gain_eur += lot.taxable_gain_eur;
       sale.tax += (lot.taxable_gain_eur * (lot.tax_rate ?? 26)) / 100;
     }
-  });
+  }
 
   const buckets = new Map();
   const bucket = (year, portfolioId) => {
@@ -441,27 +567,25 @@ export async function computeTaxItems(dateStr, lots) {
     }
   }
 
-  const { rows: income } = await query(
-    `SELECT extract(year FROM date)::int AS year, portfolio_id, capital_flow_type, sum(market_value_eur)::float AS eur
-     FROM capital_flows WHERE capital_flow_type = ANY($1) AND date <= $2 GROUP BY 1, 2, 3;`,
-    [[...CLASSIC_INCOME, ...CRYPTO_INCOME], dateStr],
-  );
-  for (const row of income) {
-    const type = portfolios.get(row.portfolio_id)?.portfolio_type;
-    if (CRYPTO_INCOME.includes(row.capital_flow_type) && type === "Cryptocurrency Investment") {
-      bucket(row.year, row.portfolio_id).cripto += row.eur;
-      bucket(row.year, row.portfolio_id).taxCripto += (row.eur * cryptoRate(row.year)) / 100;
+  for (const flow of inputs.income) {
+    if (flow.date > asOf) continue;
+    const year = Number(flow.date.slice(0, 4));
+    const type = portfolios.get(flow.portfolio_id)?.portfolio_type;
+    if (CRYPTO_INCOME.includes(flow.capital_flow_type) && type === "Cryptocurrency Investment") {
+      bucket(year, flow.portfolio_id).cripto += flow.eur;
+      bucket(year, flow.portfolio_id).taxCripto += (flow.eur * cryptoRate(year)) / 100;
     }
-    if (CLASSIC_INCOME.includes(row.capital_flow_type) && type === "Traditional Investment") {
-      bucket(row.year, row.portfolio_id).capitale += row.eur;
-      bucket(row.year, row.portfolio_id).taxCapitale += row.eur * 0.26;
+    if (CLASSIC_INCOME.includes(flow.capital_flow_type) && type === "Traditional Investment") {
+      bucket(year, flow.portfolio_id).capitale += flow.eur;
+      bucket(year, flow.portfolio_id).taxCapitale += flow.eur * 0.26;
     }
   }
-  const { rows: withheld } = await query(
-    `SELECT extract(year FROM date)::int AS year, portfolio_id, sum(market_value_eur)::float AS eur
-     FROM capital_flows WHERE capital_flow_type = 'CAPITAL_GAIN_TAX' AND date <= $1 GROUP BY 1, 2;`,
-    [dateStr],
-  );
+  const withheld = new Map();
+  for (const flow of inputs.withheld) {
+    if (flow.date > asOf) continue;
+    const key = `${flow.date.slice(0, 4)}|${flow.portfolio_id}`;
+    withheld.set(key, (withheld.get(key) ?? 0) + flow.eur);
+  }
 
   const carried = new Map(); // loss pool -> [{ year, amount }]
   // Year by year, losses first, so a loss offsets the same year's gains of its pool whatever the portfolio name
@@ -492,35 +616,51 @@ export async function computeTaxItems(dateStr, lots) {
     const diversiRate = row.diversi ? row.taxDiversi / row.diversi : 0.26;
     add(year, portfolioId, "TAX_EST", row.taxCapitale + Math.max(diversiTaxable, 0) * diversiRate + row.taxCripto);
     add(year, portfolioId, "MINUS_CARRIED", losses.reduce((total, loss) => total + loss.amount, 0));
-    add(year, portfolioId, "CAPITAL_GAIN_TAX_WITHHELD", withheld.find((w) => w.year === year && w.portfolio_id === portfolioId)?.eur);
+    add(year, portfolioId, "CAPITAL_GAIN_TAX_WITHHELD", withheld.get(key));
   }
 
-  const { rows: navStats } = await query(
-    `SELECT n.portfolio_id, extract(year FROM n.date)::int AS year, min(n.date)::text AS first, max(n.date)::text AS last,
-            (array_agg(n.nav_eur ORDER BY n.date))[1]::float AS start_nav, max(n.nav_eur)::float AS max_nav,
-            (array_agg(n.nav_eur ORDER BY n.date DESC))[1]::float AS end_nav
-     FROM nav n JOIN portfolios p USING (portfolio_id)
-     WHERE p.ivafe_taxable AND n.date >= $1 AND n.date <= $2 GROUP BY 1, 2;`,
-    [`${FIRST_TAX_YEAR}-01-01`, dateStr],
-  );
-  for (const row of navStats) {
-    const days = utils.daysBetween(row.first, row.last).length;
-    add(row.year, row.portfolio_id, "START_NAV", row.start_nav);
-    add(row.year, row.portfolio_id, "MAX_NAV", row.max_nav);
-    add(row.year, row.portfolio_id, "END_NAV", row.end_nav);
-    add(row.year, row.portfolio_id, "DAYS_HELD", days);
-    const isCash = portfolios.get(row.portfolio_id).portfolio_type === "Cash";
-    add(row.year, row.portfolio_id, "IVAFE_EST", isCash ? (34.2 * days) / 365 : (0.002 * Math.max(row.end_nav, 0) * days) / 365);
+  // IVAFE portfolios: flow blocks per year up to asOf
+  for (const [portfolioId, series] of inputs.navs) {
+    if (!series.length) continue;
+    const portfolio = portfolios.get(portfolioId);
+    const isCash = portfolio.portfolio_type === "Cash";
+    const flows = inputs.flows.get(portfolioId);
+    const first = series[0][0] > `${FIRST_TAX_YEAR}-01-01` ? series[0][0] : `${FIRST_TAX_YEAR}-01-01`;
+    const closed = portfolio.closed_date ? utils.formatDateToISO(portfolio.closed_date) : null;
+    const last = [asOf, series.at(-1)[0], closed].filter(Boolean).sort()[0];
+    for (let year = Number(first.slice(0, 4)); year <= Number(last.slice(0, 4)); year++) {
+      const start = first > `${year}-01-01` ? first : `${year}-01-01`;
+      const end = last < `${year}-12-31` ? last : `${year}-12-31`;
+      if (start > end) continue;
+      const splits = [...flows.keys()].filter((date) => date > start && date <= end).sort();
+      const bounds = [start, ...splits];
+      if (bounds.at(-1) < end) bounds.push(end);
+      let ivafe = 0;
+      for (let i = 0; i < Math.max(bounds.length - 1, 1); i++) {
+        const [blockStart, blockEnd] = bounds.length > 1 ? [bounds[i], bounds[i + 1]] : [start, end];
+        const startNav = valueOn(series, blockStart) ?? 0;
+        const endNav = (valueOn(series, blockEnd) ?? 0) - (flows.has(blockEnd) && blockEnd !== start ? flows.get(blockEnd) : 0);
+        let maxNav = Math.max(startNav, endNav);
+        for (const [date, nav] of series) if (date > blockStart && date < blockEnd && nav > maxNav) maxNav = nav;
+        const days = utils.daysBetween(blockStart, blockEnd).length - (i > 0 ? 1 : 0);
+        add(year, portfolioId, "START_NAV", startNav, blockStart, blockEnd);
+        add(year, portfolioId, "MAX_NAV", maxNav, blockStart, blockEnd);
+        add(year, portfolioId, "END_NAV", endNav, blockStart, blockEnd);
+        add(year, portfolioId, "DAYS_HELD", days, blockStart, blockEnd);
+        ivafe += isCash ? (34.2 * days) / 365 : (0.002 * Math.max(endNav, 0) * days) / 365;
+      }
+      add(year, portfolioId, "IVAFE_EST", ivafe);
+    }
   }
 
-  // Unrealized on dateStr, from the open lots (already valued in computeLots)
-  const year = Number(dateStr.slice(0, 4));
+  // Unrealized on asOf, from the open lots (already valued in computeLots)
+  const year = Number(asOf.slice(0, 4));
   const unrealized = new Map();
   for (const lot of openLots) {
     if (lot.unrealized_pnl_eur === null) continue;
     const row = unrealized.get(lot.portfolio_id) ?? unrealized.set(lot.portfolio_id, { pnl: 0, tax: 0 }).get(lot.portfolio_id);
     row.pnl += lot.unrealized_pnl_eur;
-    row.tax += lot.est_tax_eur;
+    row.tax += lot.est_tax_eur ?? 0;
   }
   let unrealizedTax = 0;
   for (const [portfolioId, row] of unrealized) {
@@ -529,4 +669,20 @@ export async function computeTaxItems(dateStr, lots) {
     unrealizedTax += row.tax;
   }
   return { items, unrealizedTax };
+}
+
+/**
+ * Tax owed on asOf and not paid yet (REALIZED_TAX, user 2026-10-30): for every tax year not settled by a tax_payments
+ * row paid on or before asOf, the declared side as known on asOf: TAX_EST of the DICHIARATIVO / DICHIARATIVO_CRYPTO
+ * portfolios + IVAFE_EST of the IVAFE portfolios (both go through the tax return; AMMINISTRATO is withheld at sale).
+ */
+function realizedTaxOwed(inputs, asOf, payments) {
+  const settled = new Set(payments.filter((payment) => payment.paid_on <= asOf).map((payment) => payment.tax_year));
+  let owed = 0;
+  for (const item of taxItemsAsOf(inputs, asOf).items) {
+    if (settled.has(item.tax_year)) continue;
+    const portfolio = inputs.portfolios.get(item.portfolio_id);
+    if ((item.item === "TAX_EST" && /^DICHIARATIVO/.test(portfolio?.fiscal_regime ?? "")) || (item.item === "IVAFE_EST" && portfolio?.ivafe_taxable)) owed += item.value_eur;
+  }
+  return owed;
 }
