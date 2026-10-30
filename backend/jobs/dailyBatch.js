@@ -16,6 +16,7 @@ import { valuation } from "../src/valuation.js";
 import { aggregates } from "../src/aggregates.js";
 import { taxes } from "../src/taxes.js";
 import { performance } from "../src/performance.js";
+import { risk } from "../src/risk.js";
 import { sendQcEmail } from "../src/qcNotification.js";
 
 async function executePipeline() {
@@ -45,6 +46,10 @@ async function executePipeline() {
   // 7. Performance: security, portfolio and aggregate returns, then the nav returns (needs the portfolio and aggregate
   // navs). Every level restarts from the earliest data written since its last run.
   await performance.run(config.date);
+
+  // 8. Risk: ex-ante snapshots (volatility, drawdowns, VaR / ES, stress, tail capture) of the securities held, the
+  // performance portfolios and the aggregates, on today's composition and positions
+  await risk.run(config.date);
 
   // n. Overnight Quality Control Engine
   // In dry-run mode, QC queries the same uncommitted transaction client and verifies actual data
