@@ -2,9 +2,10 @@ import nodemailer from "nodemailer";
 import { config } from "../config.js";
 
 // Material Design 3 baseline light scheme (seed #6750A4, the purple of the M3 guidelines; user), shared by every email.
-// M3 has no success / warning roles: they are Theme Builder custom colors (4 roles each, tones 40 / 100 / 90 / 10 of
-// their palette, generated with @material/material-color-utilities): success = green #2E7D32 harmonized to the seed;
-// warning = amber #FBC02D NOT harmonized (harmonized it turns orange, too close to the error container).
+// M3 has no success / warning roles: they are custom colors with the 4 Theme Builder roles (tones 40 / 100 / 90 / 10,
+// @material/material-color-utilities). Picked by the user (2026-10-31): muted to the softness of the purple
+// containers (light shades at chroma 16-20; saturated greens at chroma ~50 popped out too much): success = sage
+// (hue 150), warning = amber (hue 85), error = muted red (hue 25), the solid tones at chroma 36-48.
 export const M3 = {
   primary: "#6750A4",
   onPrimary: "#FFFFFF",
@@ -21,18 +22,18 @@ export const M3 = {
   onSurfaceVariant: "#49454F",
   outline: "#79747E",
   outlineVariant: "#CAC4D0",
-  error: "#B3261E",
+  error: "#9C4239",
   onError: "#FFFFFF",
-  errorContainer: "#F9DEDC",
-  onErrorContainer: "#410E0B",
-  success: "#006D43",
+  errorContainer: "#FFDAD6",
+  onErrorContainer: "#2E1411",
+  success: "#36693E",
   onSuccess: "#FFFFFF",
-  successContainer: "#92F7BC",
-  onSuccessContainer: "#002111",
-  warning: "#795900",
+  successContainer: "#D4E8D1",
+  onSuccessContainer: "#0F1F11",
+  warning: "#78590C",
   onWarning: "#FFFFFF",
-  warningContainer: "#FFDFA0",
-  onWarningContainer: "#261A00",
+  warningContainer: "#F9DFB0",
+  onWarningContainer: "#261900",
 };
 export const M3_FONT = "Roboto, 'Google Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif";
 
