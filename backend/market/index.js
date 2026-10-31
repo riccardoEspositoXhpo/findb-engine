@@ -1,8 +1,8 @@
-import { utils } from "./utils.js";
-import { batchLog } from "./batchLog.js";
-import { query, replaceDataInDb, withSavepoint } from "./db.js";
-import { config } from "../config.js";
-import { fetchSecurityPrice, fetchSecurityDividends } from "./priceProviders.js";
+import { utils } from "#core/utils.js";
+import { batchLog } from "#core/batchLog.js";
+import { query, replaceDataInDb, withSavepoint } from "#core/db.js";
+import { config } from "#config";
+import { fetchSecurityPrice, fetchSecurityDividends } from "#market/providers.js";
 
 export const marketData = {
   run,

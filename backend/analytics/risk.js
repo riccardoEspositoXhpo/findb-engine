@@ -1,7 +1,7 @@
-import { utils } from "./utils.js";
-import { batchLog } from "./batchLog.js";
-import { query, withSavepoint } from "./db.js";
-import { loadFxRates, currencyConverter } from "./marketData.js";
+import { utils } from "#core/utils.js";
+import { batchLog } from "#core/batchLog.js";
+import { query, withSavepoint } from "#core/db.js";
+import { loadFxRates, currencyConverter } from "#market/index.js";
 
 export const risk = {
   run,

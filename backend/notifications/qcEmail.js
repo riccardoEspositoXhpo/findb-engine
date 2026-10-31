@@ -1,5 +1,5 @@
 import nodemailer from "nodemailer";
-import { config } from "../config.js";
+import { config } from "#config";
 
 // Material Design 3 baseline light scheme (seed #6750A4, the purple of the M3 guidelines; user), shared by every email.
 // M3 has no success / warning roles: they are custom colors with the 4 Theme Builder roles (tones 40 / 100 / 90 / 10,

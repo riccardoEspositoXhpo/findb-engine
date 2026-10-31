@@ -1,11 +1,11 @@
 import { ImapFlow } from "imapflow";
-import { batchLog } from "./batchLog.js";
+import { batchLog } from "#core/batchLog.js";
 import { simpleParser } from "mailparser";
-import { utils } from "./utils.js";
-import { query } from "./db.js";
-import { config } from "../config.js";
-import { insertNewEvents } from "./events.js";
-import { ledger } from "./ledger.js";
+import { utils } from "#core/utils.js";
+import { query } from "#core/db.js";
+import { config } from "#config";
+import { insertNewEvents } from "#ledger/events.js";
+import { ledger } from "#ledger/ledger.js";
 
 export const scrapeEmails = {
   run,

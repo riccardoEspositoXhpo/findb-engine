@@ -1,12 +1,12 @@
 import crypto from "crypto";
-import { batchLog } from "./batchLog.js";
-import { utils } from "./utils.js";
-import { importDatabase, query, replaceDataInDb, withSavepoint } from "./db.js";
-import { loadFxRates, currencyConverter } from "./marketData.js";
-import { ledger, OUTFLOW_TYPES } from "./ledger.js";
-import { securityResolver } from "./securityResolver.js";
-import { config } from "../config.js";
-import { readLabelAttachments } from "./scrapeEmails.js";
+import { batchLog } from "#core/batchLog.js";
+import { utils } from "#core/utils.js";
+import { importDatabase, query, replaceDataInDb, withSavepoint } from "#core/db.js";
+import { loadFxRates, currencyConverter } from "#market/index.js";
+import { ledger, OUTFLOW_TYPES } from "#ledger/ledger.js";
+import { securityResolver } from "#ledger/securityResolver.js";
+import { config } from "#config";
+import { readLabelAttachments } from "#ledger/scrapeEmails.js";
 
 // Securities valued at 1 per unit (same list as ledger.js)
 const UNIT_VALUED = ["CASH", "DEBT", "CRYPTO"];

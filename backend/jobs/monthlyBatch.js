@@ -8,11 +8,11 @@
  * - Dry run (transaction rollback), pool teardown and exit codes: runJob (batchRunner.js).
  */
 
-import { config } from "../config.js";
-import { lookthrough } from "../src/lookthrough.js";
-import { sendCrashEmail } from "../src/qcNotification.js";
-import { runStep, runJob } from "../src/batchRunner.js";
-import { batchLog } from "../src/batchLog.js";
+import { config } from "#config";
+import { lookthrough } from "#analytics/lookthrough/index.js";
+import { sendCrashEmail } from "#notifications/qcEmail.js";
+import { runStep, runJob } from "#core/batchRunner.js";
+import { batchLog } from "#core/batchLog.js";
 
 async function executePipeline() {
   const date = config.date;

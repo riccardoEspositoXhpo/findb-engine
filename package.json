@@ -2,6 +2,16 @@
   "name": "findb",
   "version": "1.0.0",
   "type": "module",
+  "imports": {
+    "#config": "./backend/config.js",
+    "#core/*": "./backend/core/*",
+    "#market/*": "./backend/market/*",
+    "#ledger/*": "./backend/ledger/*",
+    "#valuation/*": "./backend/valuation/*",
+    "#analytics/*": "./backend/analytics/*",
+    "#qc/*": "./backend/qc/*",
+    "#notifications/*": "./backend/notifications/*"
+  },
   "scripts": {
     "start": "node backend/jobs/dailyBatch.js",
     "test:batch": "node --env-file=.env.local backend/jobs/dailyBatch.js",

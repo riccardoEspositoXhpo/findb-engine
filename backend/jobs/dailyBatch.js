@@ -7,21 +7,21 @@
  * - Dry run (transaction rollback), crash email, pool teardown and exit codes: runJob (batchRunner.js).
  */
 
-import { config } from "../config.js";
-import { overnightQC } from "../src/overnightQC.js";
-import { marketData } from "../src/marketData.js";
-import { events } from "../src/events.js";
-import { scrapeEmails } from "../src/scrapeEmails.js";
-import { valuation } from "../src/valuation.js";
-import { aggregates } from "../src/aggregates.js";
-import { taxes } from "../src/taxes.js";
-import { performance } from "../src/performance.js";
-import { risk } from "../src/risk.js";
-import { breakdowns } from "../src/breakdowns.js";
-import { sendQcEmail, sendCrashEmail } from "../src/qcNotification.js";
-import { runStep, runJob } from "../src/batchRunner.js";
-import { batchLog } from "../src/batchLog.js";
-import { dailyStats } from "../src/dailyStats.js";
+import { config } from "#config";
+import { overnightQC } from "#qc/index.js";
+import { marketData } from "#market/index.js";
+import { events } from "#ledger/events.js";
+import { scrapeEmails } from "#ledger/scrapeEmails.js";
+import { valuation } from "#valuation/index.js";
+import { aggregates } from "#valuation/aggregates.js";
+import { taxes } from "#valuation/taxes.js";
+import { performance } from "#analytics/performance.js";
+import { risk } from "#analytics/risk.js";
+import { breakdowns } from "#analytics/breakdowns.js";
+import { sendQcEmail, sendCrashEmail } from "#notifications/qcEmail.js";
+import { runStep, runJob } from "#core/batchRunner.js";
+import { batchLog } from "#core/batchLog.js";
+import { dailyStats } from "#notifications/netWorthEmail.js";
 
 async function executePipeline() {
   const date = config.date;

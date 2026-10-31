@@ -1,6 +1,6 @@
-import { utils } from "./utils.js";
-import { query } from "./db.js";
-import { M3, M3_FONT as FONT, sendHtmlEmail } from "./qcNotification.js";
+import { utils } from "#core/utils.js";
+import { query } from "#core/db.js";
+import { M3, M3_FONT as FONT, sendHtmlEmail } from "#notifications/qcEmail.js";
 
 export const dailyStats = {
   run,

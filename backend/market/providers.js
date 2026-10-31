@@ -2,8 +2,8 @@
  * This file contains the configuration for the price providers used in the application.
  */
 import * as cheerio from "cheerio";
-import { config } from "../config.js";
-import { utils } from "./utils.js";
+import { config } from "#config";
+import { utils } from "#core/utils.js";
 import YahooFinance from "yahoo-finance2";
 
 // ============================================================================

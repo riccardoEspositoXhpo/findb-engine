@@ -3,10 +3,10 @@
  * rolled-back transaction, crash email when the job dies outside its steps, pool teardown, exit code).
  */
 
-import { pool, withTransaction, withSavepoint } from "./db.js";
-import { config } from "../config.js";
-import { sendCrashEmail } from "./qcNotification.js";
-import { batchLog } from "./batchLog.js";
+import { pool, withTransaction, withSavepoint } from "#core/db.js";
+import { config } from "#config";
+import { sendCrashEmail } from "#notifications/qcEmail.js";
+import { batchLog } from "#core/batchLog.js";
 
 export const batchRunner = { runStep, runJob };
 

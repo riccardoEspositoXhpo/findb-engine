@@ -1,9 +1,9 @@
 import YahooFinance from "yahoo-finance2";
-import { config } from "../config.js";
-import { query } from "./db.js";
-import { ledger } from "./ledger.js";
-import { batchLog } from "./batchLog.js";
-import { utils } from "./utils.js";
+import { config } from "#config";
+import { query } from "#core/db.js";
+import { ledger } from "#ledger/ledger.js";
+import { batchLog } from "#core/batchLog.js";
+import { utils } from "#core/utils.js";
 
 export const securityResolver = {
   resolveSecurity,

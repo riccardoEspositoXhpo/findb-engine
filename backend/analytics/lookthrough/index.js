@@ -1,9 +1,9 @@
 import YahooFinance from "yahoo-finance2";
 import { load } from "cheerio";
-import { query, withSavepoint } from "./db.js";
-import { utils } from "./utils.js";
-import { batchLog } from "./batchLog.js";
-import { M3, M3_FONT, renderDynamicData, sendHtmlEmail } from "./qcNotification.js";
+import { query, withSavepoint } from "#core/db.js";
+import { utils } from "#core/utils.js";
+import { batchLog } from "#core/batchLog.js";
+import { M3, M3_FONT, renderDynamicData, sendHtmlEmail } from "#notifications/qcEmail.js";
 
 export const lookthrough = {
   run,

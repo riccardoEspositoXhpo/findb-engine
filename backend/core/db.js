@@ -1,6 +1,6 @@
 // PostgreSQL connection pool, transaction orchestrator, and data access layer (ESM)
-import { config } from "../config.js";
-import { utils } from "./utils.js";
+import { config } from "#config";
+import { utils } from "#core/utils.js";
 import pg from "pg";
 import { AsyncLocalStorage } from "node:async_hooks";
 
