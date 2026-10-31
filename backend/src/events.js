@@ -3,6 +3,7 @@ import { batchLog } from "./batchLog.js";
 import { query, replaceDataInDb, withSavepoint } from "./db.js";
 import { loadFxRates, currencyConverter } from "./marketData.js";
 import { ledger } from "./ledger.js";
+import { securityResolver } from "./securityResolver.js";
 
 export const events = {
   run,
@@ -146,7 +147,7 @@ async function processCashTransfer(event) {
 
 /**
  * COUPON_TRANSFER -> on the source: COUPON (income, counts in performance) + CASHOUT of the same cash; on the target:
- * CASHIN. GAS hardcoded CASH_EUR; here the event security if given, else CASH_EUR.
+ * CASHIN. GAS hardcoded CASH_EUR; here the event security if given, else the EUR cash security.
  * Migrated from processCouponTransfer in // eventsProcessing.gs
  */
 async function processCouponTransfer(event) {
@@ -154,7 +155,7 @@ async function processCouponTransfer(event) {
     throw new Error("COUPON_TRANSFER needs a source_portfolio_id");
   const common = {
     date: effectiveDate(event),
-    security_id: event.security_id ?? "CASH_EUR",
+    security_id: event.security_id ?? (await ledger.cashSecurityFor("EUR")),
     quantity: Number(event.quantity),
     event_id: event.event_id,
   };
@@ -248,8 +249,8 @@ async function moveCashBetweenAccounts(event, transaction) {
 /**
  * PURCHASE -> BUY transaction (+ cash from the source portfolio, + capital gain tax withheld on BOTs).
  * Price: event price, else latest. Counter / fee currency: the security currency, or the portfolio currency with
- * event_metadata.purchaseInBaseCcy. GAS also auto-added unknown BOT / BTP securities to securityMaster by scraping
- * Borsa Italiana: not ported, the security must exist.
+ * event_metadata.purchaseInBaseCcy. An unknown security (security_ref) is created by securityResolver before the
+ * handler runs (GAS scraped Borsa Italiana for unknown BOT / BTP).
  * Migrated from processPurchaseEvent in // eventsProcessing.gs
  */
 async function processPurchase(event) {
@@ -502,8 +503,8 @@ async function processRecurringPayment(event) {
  * Processes every event with processed_at NULL and date <= dateStr, oldest first: runs the handler for its type and
  * stamps processed_at, atomically per event. Unlike GAS (only events dated today), missed nights and late-entered
  * events are picked up. Ledger rows are dated on the effective date (process_date ?? date) and carry the event_id.
- * TODO: an event with an effective date (process_date ?? date) in the past must make ROLL recompute that portfolio
- * from that date (GAS runStartDate flag).
+ * A backdated event recomputes its ROLL portfolio from its date through the ledger rows' created_at (getRollStartDate).
+ * Events carry the raw security identifier in security_ref; it is resolved into security_id here (securityResolver).
  * Migrated from the event loop of runPortfolioEvents in // portfolioData.gs
  *
  * @param {string} dateStr - ISO date, last event date to process
@@ -526,6 +527,20 @@ export async function processEvents(dateStr) {
     }
 
     try {
+      // Raw identifier (security_ref: an ISIN from an email, a new ticker...) -> security_id, creating the security when
+      // new; in its own savepoint so a security created here stays even if the handler then fails
+      if (!event.security_id && event.security_ref) {
+        event.security_id = await withSavepoint(async () => {
+          const securityId = await securityResolver.resolveSecurity(event.security_ref, {
+            origin: event.event_metadata?.email_source?.toUpperCase() ?? "EVENT",
+            portfolioId: event.portfolio_id,
+            name: event.event_metadata?.security_name,
+            currency: event.event_metadata?.currency,
+          });
+          await query(`UPDATE events SET security_id = $2 WHERE event_id = $1;`, [event.event_id, securityId]);
+          return securityId;
+        });
+      }
       // All-or-nothing per event: a handler failing halfway leaves no ledger rows behind
       const processed = await withSavepoint(async () => {
         if (!(await handler(event))) return false;

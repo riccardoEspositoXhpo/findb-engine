@@ -5,6 +5,7 @@ import { utils } from "./utils.js";
 import { query } from "./db.js";
 import { config } from "../config.js";
 import { insertNewEvents } from "./events.js";
+import { ledger } from "./ledger.js";
 
 export const scrapeEmails = {
   run,
@@ -66,11 +67,16 @@ export async function run(targetDate = new Date()) {
         const events = source.parse(email, source.portfolioId);
         if (events === null) continue; // ignored on purpose (e.g. emails forwarded by the user)
         if (events.length === 0) {
-          batchLog.warn("scrapeEmails", label, `could not parse "${email.subject}" (${email.date}), skipped.`);
+          // Every email becomes an event (user, 2026-10-31): an unparsed one is kept as UNPARSED_EMAIL, which no handler
+          // processes (pending, in the QC batch warnings) until the parser is fixed or the real event is typed in
+          batchLog.warn("scrapeEmails", label, `could not parse "${email.subject}" (${email.date}), kept as an UNPARSED_EMAIL event.`);
           summary.unparsed++;
-          continue;
+          events.push({ date: email.dateStr, event_type: "UNPARSED_EMAIL", portfolio_id: source.portfolioId, quantity: 0 });
         }
         for (const event of events) {
+          // A debt balance (card statements) is held in the portfolio's DEBT security, found by attributes
+          if (event.event_metadata?.holding === "DEBT" && !event.security_id)
+            event.security_id = await ledger.debtSecurityFor("EUR").catch(() => null);
           candidates.push({
             ...event,
             event_notes: `[EMAIL] ${email.subject ?? label}`,
@@ -217,8 +223,8 @@ function italianAmountAfter(text, markerRegex) {
   return match ? utils.convertItalianFloat(match[1]) : null;
 }
 
-function balanceEvent(email, portfolioId, balance, securityId = null) {
-  return [{ date: email.dateStr, event_type: "BALANCE", portfolio_id: portfolioId, security_id: securityId, quantity: balance }];
+function balanceEvent(email, portfolioId, balance, holding = null) {
+  return [{ date: email.dateStr, event_type: "BALANCE", portfolio_id: portfolioId, quantity: balance, ...(holding ? { event_metadata: { holding } } : {}) }];
 }
 
 /**
@@ -240,13 +246,13 @@ export function parseFideuramBalance(email, portfolioId) {
 }
 
 /**
- * AMEX statement: first euro amount after "Saldo corrente", negated (a card balance is money owed), held as DEBT_EUR
- * (GAS: CASH_EUR since ~2026-09, DEBT_EUR before).
+ * AMEX statement: first euro amount after "Saldo corrente", negated (a card balance is money owed), held in the EUR
+ * DEBT security (GAS: CASH_EUR since ~2026-09, DEBT_EUR before).
  * Migrated from createandRunBalanceFromFile (AMEX) in // portfolioData.gs
  */
 export function parseAmexBalance(email, portfolioId) {
   const balance = italianAmountAfter(email.text, "Saldo corrente[\\s\\S]{0,2000}?€");
-  return balance === null ? [] : balanceEvent(email, portfolioId, -balance, "DEBT_EUR");
+  return balance === null ? [] : balanceEvent(email, portfolioId, -balance, "DEBT");
 }
 
 /**
@@ -255,29 +261,13 @@ export function parseAmexBalance(email, portfolioId) {
  * - "Nota informativa <order>" -> the PDF note of an executed order: PURCHASE (Acquisto) or SALE (Vendita, and
  *   Liquidazione = redemption at maturity) on the execution date, quantity summed over the fills, price = Controvalore /
  *   quantity, fees_override = Commissioni, event_metadata { order_id, tax_withheld = Ritenuta (capital gain tax
- *   on sales) }. The PDF names the security by ISIN only: mapped with DIRECTA_ISINS (unknown ISIN = unparsed + warning).
+ *   on sales) }. The PDF names the security by ISIN only: kept as security_ref, resolved by processEvents (isin column).
  * Forwarded copies ("Fwd: ...", sent by the user to others) return null: ignored, not counted as unparsed.
  *
  * @returns {Array<Object>|null} events
  */
 export function parseDirecta(email, portfolioId) {
-  // ISIN -> security_id of the securities traded on Directa (add new ones here)
-  const DIRECTA_ISINS = {
-    CH1322071304: "CH1322071304",
-    CH1325429418: "CH1325429418",
-    IE00BK5BQT80: "VWCE",
-    DE000A0H0728: "EXXY",
-    IE00BL25JP72: "XDEM",
-    LU0478205379: "XBLC",
-    IE00BF540Z61: "GFA",
-    IE00BP3QZ601: "IS3Q",
-    IE00B1XNHC34: "INRG",
-    IE00BMW3QX54: "ROBO",
-    IE000YU9K6K2: "JEDI",
-    IE000NDWFGA5: "URNU",
-    IE00BYZK4776: "HEAL",
-    IE0002PG6CA6: "REMX",
-  };
+
   const subject = email.subject ?? "";
   if (/^\s*(fwd?|i)\s*:/i.test(subject)) return null;
 
@@ -305,22 +295,22 @@ export function parseDirecta(email, portfolioId) {
     const fills = [...text.matchAll(/(\d\d)\.(\d\d)\.(\d{4})\s+\S+\s+Eseguito(?: \([^)]*\))?\s+([\d.,]+)\s+([\d.,]+)/g)];
     const value = italian(text.match(/Controvalore:\s+(-?[\d.,]+)/)?.[1]);
     if (!order || !operation || !isin || fills.length === 0 || !value) continue;
-    const securityId = DIRECTA_ISINS[isin];
-    if (!securityId) {
-      batchLog.warn("scrapeEmails", "directa", `unknown ISIN ${isin} (order ${order}), add it to DIRECTA_ISINS.`);
-      continue;
-    }
     const [, day, month, year] = fills[0];
     const quantity = fills.reduce((sum, fill) => sum + italian(fill[4]), 0);
     events.push({
       date: `${year}-${month}-${day}`,
       event_type: operation === "Acquisto" ? "PURCHASE" : "SALE",
       portfolio_id: portfolioId,
-      security_id: securityId,
+      // The raw ISIN: processEvents resolves it (security_master.isin, else a new security from the providers)
+      security_ref: isin,
       quantity,
       price: value / quantity,
       fees_override: italian(text.match(/Commissioni:\s+(-?[\d.,]+)/)?.[1]),
-      event_metadata: { order_id: order, tax_withheld: italian(text.match(/Ritenuta:\s*\*?\s+(-?[\d.,]+)/)?.[1]) },
+      event_metadata: {
+        order_id: order,
+        tax_withheld: italian(text.match(/Ritenuta:\s*\*?\s+(-?[\d.,]+)/)?.[1]),
+        security_name: text.match(/(?:acquisto|vendita) di:\s*[\d.,]+\s+(.+?)\s+ISIN/i)?.[1]?.trim(),
+      },
     });
   }
   return events;

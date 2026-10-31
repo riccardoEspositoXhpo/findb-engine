@@ -1,7 +1,7 @@
 import { utils } from "./utils.js";
 import { query, replaceDataInDb, withSavepoint } from "./db.js";
 import { loadFxRates, currencyConverter } from "./marketData.js";
-import { OUTFLOW_TYPES } from "./ledger.js";
+import { ledger, OUTFLOW_TYPES } from "./ledger.js";
 import { isPortfolioActive } from "./valuation.js";
 
 export const taxes = {
@@ -68,16 +68,17 @@ export async function run(targetDate = new Date()) {
   return { openLots: lots.openLots.length, closedLots: lots.closedLots.length, taxItems: items.length, unrealizedTax, realizedTax, findings };
 }
 
-/** One negative DEBT_EUR line a day (date -> tax in EUR) for a tax portfolio, from its inception (closed: to its end). */
+/** One negative line a day in the EUR DEBT security (date -> tax in EUR) for a tax portfolio, from its inception (closed: to its end). */
 async function writeTaxPortfolio(portfolioId, series) {
   const { rows } = await query(`SELECT * FROM portfolios WHERE portfolio_id = $1;`, [portfolioId]);
   if (!rows[0]) return;
+  const debtSecurity = await ledger.debtSecurityFor("EUR");
   const positionRows = [];
   const navRows = [];
   for (const [date, tax] of series) {
     if (!isPortfolioActive(rows[0], date)) continue;
     const value = -Number(tax.toFixed(2));
-    positionRows.push({ date, portfolio_id: portfolioId, security_id: "DEBT_EUR", quantity: value, price: 1, market_value_local: value, market_value_base: value, market_value_eur: value, weight: 100 });
+    positionRows.push({ date, portfolio_id: portfolioId, security_id: debtSecurity, quantity: value, price: 1, market_value_local: value, market_value_base: value, market_value_eur: value, weight: 100 });
     navRows.push({ date, portfolio_id: portfolioId, nav: value, nav_eur: value });
   }
   await withSavepoint(async () => {
@@ -122,8 +123,15 @@ export async function computeLots(dateStr, { history = false } = {}) {
   const { rows: portfolioRows } = await query(`SELECT portfolio_id, currency, fiscal_regime, portfolio_type, closed_date, ivafe_taxable FROM portfolios;`);
   const portfolios = new Map(portfolioRows.map((row) => [row.portfolio_id, row]));
 
-  const securityFor = (currency) => (securities.has(`CASH_${currency}`) ? `CASH_${currency}` : currency);
-  const isCashLike = (securityId) => ["CASH", "DEBT"].includes(securities.get(securityId)?.asset_type) || stablecoins.has(securityId);
+  // Holding of a currency: its CASH security (fiat) or CRYPTO security (tokens), found by attributes, not by name
+  const holdings = new Map();
+  for (const row of securityRows)
+    if (row.asset_type === "CASH" || (row.asset_type === "CRYPTO" && !holdings.has(row.currency))) holdings.set(row.currency, row.security_id);
+  const securityFor = (currency) => holdings.get(currency) ?? currency;
+  const isCashLike = (securityId) => {
+    const security = securities.get(securityId);
+    return ["CASH", "DEBT"].includes(security?.asset_type) || (security?.asset_type === "CRYPTO" && stablecoins.has(security.currency));
+  };
   const costMethod = (securityId) => (securities.get(securityId)?.asset_type === "CRYPTO" ? "LIFO" : "AVG");
   const toEur = (amount, currency, date) => {
     const rate = currencyConverter(currency, "EUR", date);

@@ -36,7 +36,7 @@ const OPEN_END = "2222-12-31";
 // A sector below 1% of a portfolio / aggregate goes to "Other"; a navless portfolio counts for 100 days at most
 const MIN_SECTOR_PCT = 1;
 const NAV_MAX_AGE_DAYS = 100;
-const EXCLUDED_SECURITIES = ["ERROR"]; // GAS placeholder
+const EXCLUDED_ASSET_TYPES = ["ERROR"]; // GAS placeholder security
 
 /**
  * Nightly breakdown step (after risk): security, portfolio and aggregate breakdowns, stored as intervals
@@ -245,9 +245,16 @@ const activeOn = (intervals, date) =>
  */
 export async function runSecurityBreakdowns(targetDate = new Date()) {
   const dateStr = utils.formatDateToISO(targetDate);
+  // Every currency is a CURRENCY / CURRENCY_LT sector (GAS pushed each cash currency into BREAKDOWN_DEFINITIONS): a
+  // new one (a token created by securityResolver, a currency added by hand) would break the catalog foreign key
+  await query(
+    `INSERT INTO breakdown_catalog (breakdown, sector)
+     SELECT d.breakdown, c.currency_code FROM currencies c CROSS JOIN (VALUES ('CURRENCY'), ('CURRENCY_LT')) AS d(breakdown)
+     ON CONFLICT DO NOTHING;`,
+  );
   const { rows: securities } = await query(
-    `SELECT * FROM security_master WHERE security_id <> ALL($1) ORDER BY security_id;`,
-    [EXCLUDED_SECURITIES],
+    `SELECT * FROM security_master WHERE asset_type <> ALL($1) ORDER BY security_id;`,
+    [EXCLUDED_ASSET_TYPES],
   );
   const lookthrough = await loadIntervals("lookthrough_data", "security_id");
   const writer = await intervalWriter("security_breakdowns", "security_id");

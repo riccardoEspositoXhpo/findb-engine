@@ -9,11 +9,16 @@ export const risk = {
   evaluateRiskSnapshot,
 };
 
-// Trading calendar: IUSQ sessions (weekdays) from here; crypto uses every calendar day from the same start
-const CALENDAR_BENCHMARK = "IUSQ";
+// Benchmarks, found by ISIN / crypto currency (security_id is the user's name and can change): trading calendar = the
+// sessions (weekdays) of iShares MSCI ACWI (IUSQ) from CALENDAR_START, crypto uses every calendar day; tail capture
+// against equity (IUSQ), fixed income (iShares Core Global Aggregate Bond, EUNA) and crypto (BTC)
+const BENCHMARK_REFS = {
+  calendar: { isin: "IE00B6R52259" },
+  equity: { isin: "IE00B6R52259" },
+  fixedIncome: { isin: "IE00BDBRDM35" },
+  crypto: { crypto: "BTC" },
+};
 const CALENDAR_START = "2016-01-01";
-// Tail capture benchmarks: equity, fixed income, crypto (worst TAIL_SESSIONS sessions each)
-const BENCHMARKS = { equity: "IUSQ", fixedIncome: "EUNA", crypto: "BTC" };
 const TAIL_SESSIONS = 30;
 // A security may miss its price for up to this many sessions (local holidays: 0% carried); more is a data hole
 const MAX_MISSING_SESSIONS = 3;
@@ -121,7 +126,7 @@ async function loadRiskData(dateStr) {
   const securities = new Map(
     (
       await query(
-        `SELECT security_id, currency, asset_type, risk_proxy FROM security_master;`,
+        `SELECT security_id, currency, asset_type, risk_proxy, isin FROM security_master;`,
       )
     ).rows.map((row) => [row.security_id, row]),
   );
@@ -151,7 +156,15 @@ async function loadRiskData(dateStr) {
   const { rows: overrides } = await query(
     `SELECT portfolio_id, start_date::text AS start_date, my_share::float AS my_share FROM ownership_overrides ORDER BY portfolio_id, start_date;`,
   );
-  const calendarDates = [...(prices.get(CALENDAR_BENCHMARK)?.keys() ?? [])]
+  const benchmarks = {};
+  for (const [role, ref] of Object.entries(BENCHMARK_REFS)) {
+    const match = [...securities.values()].find((security) =>
+      ref.isin ? security.isin === ref.isin : security.asset_type === "CRYPTO" && security.currency === ref.crypto,
+    );
+    if (!match) throw new Error(`risk benchmark ${role} (${JSON.stringify(ref)}) not in security_master`);
+    benchmarks[role] = match.security_id;
+  }
+  const calendarDates = [...(prices.get(benchmarks.calendar)?.keys() ?? [])]
     .filter(
       (date) =>
         date >= CALENDAR_START &&
@@ -166,6 +179,7 @@ async function loadRiskData(dateStr) {
     aggregates,
     overrides,
     calendarDates,
+    benchmarks,
   };
 }
 
@@ -222,17 +236,17 @@ async function riskForDate(data, day) {
   };
   const tails = (calendar, isCrypto) => ({
     eqTailCluster: extractBenchmarkTailCluster(
-      vectorFor(BENCHMARKS.equity, calendar252),
+      vectorFor(data.benchmarks.equity, calendar252),
       calendar252,
       TAIL_SESSIONS,
     ),
     fiTailCluster: extractBenchmarkTailCluster(
-      vectorFor(BENCHMARKS.fixedIncome, calendar252),
+      vectorFor(data.benchmarks.fixedIncome, calendar252),
       calendar252,
       TAIL_SESSIONS,
     ),
     cryptoTailCluster: extractBenchmarkTailCluster(
-      vectorFor(BENCHMARKS.crypto, calendar),
+      vectorFor(data.benchmarks.crypto, calendar),
       calendar,
       TAIL_SESSIONS,
     ),
@@ -383,7 +397,7 @@ async function riskForDate(data, day) {
       const meta = data.securities.get(securityId);
       if (
         meta &&
-        (meta.security_id === `CASH_${aggregate.currency}` ||
+        ((meta.asset_type === "CASH" && meta.currency === aggregate.currency) ||
           (REAL_ASSETS.includes(meta.asset_type) && !meta.risk_proxy))
       )
         return { weight, vector: zero };

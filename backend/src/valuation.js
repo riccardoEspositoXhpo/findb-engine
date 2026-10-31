@@ -4,6 +4,7 @@ import { utils } from "./utils.js";
 import { importDatabase, query, replaceDataInDb, withSavepoint } from "./db.js";
 import { loadFxRates, currencyConverter } from "./marketData.js";
 import { ledger, OUTFLOW_TYPES } from "./ledger.js";
+import { securityResolver } from "./securityResolver.js";
 import { config } from "../config.js";
 import { readLabelAttachments } from "./scrapeEmails.js";
 
@@ -98,7 +99,7 @@ export async function run(targetDate = new Date(), options = {}) {
  * Portfolios that must be valued on dateStr even if it isn't their scheduled day, because their value changed:
  * - RECURRING_FLOWS: an instalment / one-off with eval_date = dateStr
  * - ROLL: an event for the portfolio dated dateStr (GAS getEvents: PORTFOLIO_ID + DATE)
- * TODO: backdate flags (GAS runStartDate) — not ported yet
+ * Backdated changes (GAS runStartDate flags) need no trigger here: ROLL restarts from them (getRollStartDate).
  *
  * @param {string} dateStr - ISO date
  * @returns {Promise<Set<string>>} portfolio ids
@@ -412,7 +413,7 @@ export async function runBalance(portfolio, dateStr) {
   }
   return runOneLinePortfolio(
     portfolio,
-    `CASH_${portfolio.currency}`,
+    await ledger.cashSecurityFor(portfolio.currency),
     1,
     balance,
     dateStr,
@@ -441,7 +442,7 @@ export async function runFile(portfolio, dateStr) {
   if (rows.length === 0)
     throw new Error(`no BALANCE event on or before ${dateStr}`);
 
-  const securityId = rows[0].security_id ?? `CASH_${portfolio.currency}`;
+  const securityId = rows[0].security_id ?? (await ledger.cashSecurityFor(portfolio.currency));
   return runOneLinePortfolio(
     portfolio,
     securityId,
@@ -455,7 +456,7 @@ export async function runFile(portfolio, dateStr) {
  * RECURRING_FLOWS: one-line portfolio = sum of the latest outstanding amount per payment (eval_date <= date, within
  * start_date <= date < end_date), held in the rows' security (DEBT_EUR for loans, CASH_EUR for receivables).
  * No rows (e.g. EXTRA_LIQUID) -> zero balance in base-currency cash, like GAS.
- * Only valuation: the payment flows GAS wrote on the eval date belong to events (not ported yet).
+ * Only valuation: the payment flows GAS wrote on the eval date are RECURRING_PAYMENT events (events.generateRecurringFlowEvents).
  * Migrated from runRecurringFlows in // portfolioData.gs
  *
  * @param {Object} portfolio - Row from portfolios
@@ -483,7 +484,7 @@ export async function runRecurringFlows(portfolio, dateStr) {
   if (rows.length === 0) {
     return runOneLinePortfolio(
       portfolio,
-      `CASH_${portfolio.currency}`,
+      await ledger.cashSecurityFor(portfolio.currency),
       1,
       0,
       dateStr,
@@ -605,7 +606,7 @@ export async function runKraken(portfolio, dateStr) {
   const positions = [];
   for (const [code, quantity] of Object.entries(quantities)) {
     positions.push({
-      security_id: await ledger.cashSecurityFor(code),
+      security_id: await securityResolver.resolveCurrencyHolding(code, { origin: "KRAKEN", portfolioId: portfolio.portfolio_id }),
       quantity,
       price: 1,
     });
@@ -743,7 +744,7 @@ export async function runKraken(portfolio, dateStr) {
         date: entryDate,
         portfolio_id: portfolioId,
         capital_flow_type: flowType,
-        security_id: await ledger.cashSecurityFor(code),
+        security_id: await securityResolver.resolveCurrencyHolding(code, { origin: "KRAKEN", portfolioId }),
         quantity: Math.abs(amount) - fee,
         source: "KRAKEN",
         external_id: entry.id,
@@ -769,11 +770,13 @@ export async function runKraken(portfolio, dateStr) {
       const quantity = Math.abs(asset.amount);
       const counterValue = Math.abs(counter.amount);
       const feeLeg = given.fee > 0 ? given : received;
+      // Both legs' currencies must exist (a new token is created from CoinMarketCap)
+      await securityResolver.resolveCurrencyHolding(counter.code, { origin: "KRAKEN", portfolioId });
 
       await ledger.addTransaction({
         date: received.date,
         portfolio_id: portfolioId,
-        security_id: await ledger.cashSecurityFor(asset.code),
+        security_id: await securityResolver.resolveCurrencyHolding(asset.code, { origin: "KRAKEN", portfolioId }),
         transaction_type: isSell ? "SELL" : "BUY",
         quantity,
         fee:
@@ -904,6 +907,8 @@ export async function runCryptoCom(portfolio, dateStr) {
     const isCashLike = (code) =>
       ["FIAT", "STABLECOIN"].includes(currencyTypes.get(code));
 
+    // Currency code -> its holding security (a new token is created from CoinMarketCap)
+    const holding = (code) => securityResolver.resolveCurrencyHolding(code, { origin: "CRYPTO_COM", portfolioId });
     let firstNewDate = null;
     let written = 0;
     for (const file of files) {
@@ -951,22 +956,23 @@ export async function runCryptoCom(portfolio, dateStr) {
               ...common,
               external_id: `${externalId}:cashin`,
               capital_flow_type: "CASHIN",
-              security_id: await ledger.cashSecurityFor(row.Currency),
+              security_id: await holding(row.Currency),
               quantity: amount,
             });
             await ledger.addTransaction({
               ...common,
               transaction_type: "BUY",
-              security_id: await ledger.cashSecurityFor(row["To Currency"]),
+              security_id: await holding(row["To Currency"]),
               quantity: toAmount,
               counter_currency: row.Currency,
               market_value_local: amount,
             });
           } else {
+            await holding(row["To Currency"]); // the counter currency must exist
             await ledger.addTransaction({
               ...common,
               transaction_type: "SELL",
-              security_id: await ledger.cashSecurityFor(row.Currency),
+              security_id: await holding(row.Currency),
               quantity: amount,
               counter_currency: row["To Currency"],
               market_value_local: toAmount,
@@ -981,7 +987,7 @@ export async function runCryptoCom(portfolio, dateStr) {
           await ledger.addCapitalFlow({
             ...common,
             capital_flow_type: flowType,
-            security_id: await ledger.cashSecurityFor(row.Currency),
+            security_id: await holding(row.Currency),
             quantity: amount,
           });
         }
@@ -1006,15 +1012,25 @@ export async function runCryptoCom(portfolio, dateStr) {
  * @returns {Promise<boolean>} true if positions/nav were written
  */
 export async function runAllianz(portfolio, dateStr) {
-  // Allianz "Linea" -> security_id
-  const ALLIANZ_FUNDS = {
-    "LINEA AZIONARIA": "ALLIANZ_AZIONARIA",
-    "LINEA BILANCIATA": "ALLIANZ_BILANCIATA",
-    "LINEA MULTIASSET": "ALLIANZ_MULTIASSET",
-    "LINEA OBBLIGAZIONARIA LUNGO TERMINE": "ALLIANZ_OBBLT",
-    "LINEA OBBLIGAZIONARIA BREVE TERMINE": "ALLIANZ_OBBST",
-    "LINEA FLESSIBILE": "ALLIANZ_FLESSIBILE",
-  };
+  // Allianz "Linea" -> security: the security with source ALLIANZ and source_id = the line name (security_id is the
+  // user's name and can change); an unknown line is created for review (securityResolver)
+  const { rows: lineRows } = await query(`SELECT source_id, security_id FROM security_master WHERE source = 'ALLIANZ';`);
+  const lines = new Map(lineRows.map((row) => [row.source_id, row.security_id]));
+  const securityForLine = async (lineName) =>
+    lines.get(lineName) ??
+    lines
+      .set(
+        lineName,
+        await securityResolver.resolveSecurity(`ALLIANZ_${lineName.replace(/^LINEA\s+/i, "").replace(/\W+/g, "_").toUpperCase()}`, {
+          origin: "ALLIANZ",
+          portfolioId: portfolio.portfolio_id,
+          kind: "name",
+          name: `Allianz Insieme ${lineName}`,
+          source: "ALLIANZ",
+          sourceId: lineName,
+        }),
+      )
+      .get(lineName);
 
   try {
     for (const file of await readLabelAttachments("allianz", /\.xls$/i))
@@ -1069,11 +1085,7 @@ export async function runAllianz(portfolio, dateStr) {
       if (typeof row[valueDate] !== "number") continue;
       const date = utils.addDays("1899-12-30", row[valueDate]); // Excel serial date
       if (date > dateStr) continue;
-      const securityId = ALLIANZ_FUNDS[row[line]];
-      if (!securityId)
-        throw new Error(
-          `ALLIANZ: unknown fund "${row[line]}" (${filename}), add it to ALLIANZ_FUNDS`,
-        );
+      const securityId = await securityForLine(row[line]);
       const day =
         days.get(date) ??
         days.set(date, { cash: 0, funds: new Map() }).get(date);
@@ -1081,7 +1093,7 @@ export async function runAllianz(portfolio, dateStr) {
       const fund =
         day.funds.get(securityId) ??
         day.funds
-          .set(securityId, { units: 0, value: 0, price: row[unitPrice] })
+          .set(securityId, { units: 0, value: 0, price: row[unitPrice], line: row[line] })
           .get(securityId);
       fund.units += row[units];
       fund.value += row[amount];
@@ -1111,10 +1123,12 @@ export async function runAllianz(portfolio, dateStr) {
       }
       for (const [securityId, fund] of day.funds) {
         prices.push({ date, security_id: securityId, price: fund.price, source: "ALLIANZ" });
-        if (savedIds.has(`${date}:${securityId}`)) continue;
+        // Keyed on the Allianz line (a rename of the security must not re-import its history)
+        const externalId = `${date}:${fund.line}`;
+        if (savedIds.has(externalId)) continue;
         await ledger.addTransaction({
           ...common,
-          external_id: `${date}:${securityId}`,
+          external_id: externalId,
           security_id: securityId,
           transaction_type: "BUY",
           quantity: Number(fund.units.toFixed(3)),
@@ -1198,6 +1212,10 @@ export async function runTradeRepublic(portfolio, dateStr) {
       }
     }
 
+    // The portfolio's cash security (found by its currency); the CSV names the other assets by ISIN (funds) or ticker
+    // (crypto): resolved into security_ids when written (securityResolver creates new ones for review)
+    const cash = await ledger.cashSecurityFor(portfolio.currency);
+    const assets = new Map(rows.filter((row) => row.symbol).map((row) => [row.symbol, row]));
     const target = []; // { table, external_id, type, quantity, options }
     const flow = (external_id, date, capital_flow_type, security_id, quantity, extra = {}) =>
       target.push({ table: "capital_flows", external_id, type: capital_flow_type, quantity, options: { date, capital_flow_type, security_id, quantity, ...extra } });
@@ -1223,36 +1241,36 @@ export async function runTradeRepublic(portfolio, dateStr) {
             quantity: Math.abs(num(row.shares)),
             options: { date: row.date, security_id: row.symbol, transaction_type: row.type, quantity: Math.abs(num(row.shares)), transaction_price: num(row.price), counter_currency: portfolio.currency, market_value_local: Math.abs(num(row.amount)), fee: Math.abs(fee), fee_currency: portfolio.currency },
           });
-          if (!isBuy && tax < 0) flow(`${id}:tax`, row.date, "CAPITAL_GAIN_TAX", "CASH_EUR", -tax);
+          if (!isBuy && tax < 0) flow(`${id}:tax`, row.date, "CAPITAL_GAIN_TAX", cash, -tax);
           break;
         }
         case "BENEFITS_SAVEBACK": {
           const buy = savebackBuy.get(id);
           if (!buy) {
-            flow(id, row.date, "REWARDS", "CASH_EUR", num(row.amount));
+            flow(id, row.date, "REWARDS", cash, num(row.amount));
             break;
           }
           flow(id, buy.date, "REWARDS", buy.symbol, Math.abs(num(buy.shares)), { market_value_base: -num(buy.amount) });
           const cents = Number((num(row.amount) + num(buy.amount)).toFixed(2));
-          if (cents > 0) flow(`${id}:cash`, row.date, "REWARDS", "CASH_EUR", cents);
+          if (cents > 0) flow(`${id}:cash`, row.date, "REWARDS", cash, cents);
           break;
         }
         case "INTEREST_PAYMENT":
-          flow(id, row.date, "INTEREST", "CASH_EUR", num(row.amount));
-          if (tax) flow(`${id}:tax`, row.date, tax < 0 ? "TAX" : "ADJUST_IN", "CASH_EUR", Math.abs(tax));
+          flow(id, row.date, "INTEREST", cash, num(row.amount));
+          if (tax) flow(`${id}:tax`, row.date, tax < 0 ? "TAX" : "ADJUST_IN", cash, Math.abs(tax));
           break;
         case "FREE_RECEIPT":
           flow(id, row.date, "STAKING", row.symbol, num(row.shares));
           break;
         case "TAX":
         case "TAX_OPTIMIZATION":
-          if (tax) flow(id, row.date, tax < 0 ? "TAX" : "ADJUST_IN", "CASH_EUR", Math.abs(tax));
+          if (tax) flow(id, row.date, tax < 0 ? "TAX" : "ADJUST_IN", cash, Math.abs(tax));
           break;
         case "CARD_ORDERING_FEE":
-          if (fee) flow(id, row.date, fee < 0 ? "MANAGEMENT_FEE" : "ADJUST_IN", "CASH_EUR", Math.abs(fee));
+          if (fee) flow(id, row.date, fee < 0 ? "MANAGEMENT_FEE" : "ADJUST_IN", cash, Math.abs(fee));
           break;
         case "MANUAL_CASH_TRANSFER":
-          if (num(row.amount)) flow(id, row.date, num(row.amount) > 0 ? "ADJUST_IN" : "ADJUST_OUT", "CASH_EUR", Math.abs(num(row.amount)));
+          if (num(row.amount)) flow(id, row.date, num(row.amount) > 0 ? "ADJUST_IN" : "ADJUST_OUT", cash, Math.abs(num(row.amount)));
           break;
         case "MIGRATION": {
           const key = `${row.date}|${row.symbol}`;
@@ -1265,7 +1283,7 @@ export async function runTradeRepublic(portfolio, dateStr) {
     }
     for (const [date, net] of cashByDay) {
       const amount = Number(net.toFixed(2));
-      if (amount) flow(`${date}:cash`, date, amount > 0 ? "CASHIN" : "CASHOUT", "CASH_EUR", Math.abs(amount));
+      if (amount) flow(`${date}:cash`, date, amount > 0 ? "CASHIN" : "CASHOUT", cash, Math.abs(amount));
     }
     for (const [key, net] of migrations) {
       const [date, symbol] = key.split("|");
@@ -1289,7 +1307,18 @@ export async function runTradeRepublic(portfolio, dateStr) {
         await query(`DELETE FROM ${item.table} WHERE source = 'TRADE_REPUBLIC' AND portfolio_id = $1 AND external_id = $2`, [portfolioId, item.external_id]);
         rewritten++;
       }
-      const options = { ...item.options, portfolio_id: portfolioId, source: "TRADE_REPUBLIC", external_id: item.external_id };
+      const asset = assets.get(item.options.security_id);
+      const securityId =
+        item.options.security_id === cash
+          ? cash
+          : await securityResolver.resolveSecurity(item.options.security_id, {
+              origin: "TRADE_REPUBLIC",
+              portfolioId,
+              kind: asset?.asset_class === "CRYPTO" ? "crypto" : "isin",
+              name: asset?.name,
+              currency: asset?.currency,
+            });
+      const options = { ...item.options, security_id: securityId, portfolio_id: portfolioId, source: "TRADE_REPUBLIC", external_id: item.external_id };
       await (item.table === "transactions" ? ledger.addTransaction(options) : ledger.addCapitalFlow(options));
       written++;
     }

@@ -10,6 +10,10 @@ export const ledger = {
   getLatestPriceForDate,
   computeMarketValue,
   cashSecurityFor,
+  debtSecurityFor,
+  securityByIsin,
+  securityExists,
+  reloadReferences,
   getLedgerHoldings,
 };
 
@@ -30,14 +34,45 @@ export const OUTFLOW_TYPES = [
 // Securities valued at 1 per unit (GAS CASH_AND_CRYPTO_SECURITIES + DEBT): no prices stored for them
 const UNIT_VALUED_ASSET_TYPES = ["CASH", "DEBT", "CRYPTO"];
 
-// Reference data cache (security_master, portfolios), loaded on first use
+// Reference data cache (security_master, portfolios), loaded on first use. Securities are found by attributes, never by
+// building their name (security_id is the user's internal name and can be renamed: user, 2026-10-31): the holding of a
+// currency = the CASH (fiat) / CRYPTO security with that currency, debt = the DEBT security, ISIN = the isin column.
 let securities = null;
 let portfolios = null;
+let holdingByCurrency = null;
+let debtByCurrency = null;
+let byIsin = null;
 
 async function loadReferences() {
   if (securities) return;
   securities = await importDatabase("security_master", true);
   portfolios = await importDatabase("portfolios", true);
+  holdingByCurrency = new Map();
+  debtByCurrency = new Map();
+  byIsin = new Map();
+  for (const security of securities.values()) {
+    if (security.asset_type === "CASH" || (security.asset_type === "CRYPTO" && !holdingByCurrency.has(security.currency)))
+      holdingByCurrency.set(security.currency, security.security_id);
+    if (security.asset_type === "DEBT") debtByCurrency.set(security.currency, security.security_id);
+    if (security.isin) byIsin.set(security.isin, security.security_id);
+  }
+}
+
+/** Drops the reference cache (after a security was created or changed). */
+export function reloadReferences() {
+  securities = null;
+}
+
+/** true when security_id exists in security_master. */
+export async function securityExists(securityId) {
+  await loadReferences();
+  return securities.has(securityId);
+}
+
+/** security_id of the security with this ISIN, or null. */
+export async function securityByIsin(isin) {
+  await loadReferences();
+  return byIsin.get(isin) ?? null;
 }
 
 /** security_master row, or throws. */
@@ -58,14 +93,22 @@ export async function getPortfolio(portfolioId) {
 }
 
 /**
- * Cash security holding a currency: CASH_<ccy> for fiat, the token itself for crypto (BTC, USDC...).
+ * Security holding a currency: the CASH security of that currency for fiat, the CRYPTO one for tokens (BTC, USDC...).
  * Equivalent of cashMap[currency] in // local.gs
  */
 export async function cashSecurityFor(currency) {
   await loadReferences();
-  if (securities.has(`CASH_${currency}`)) return `CASH_${currency}`;
-  if (securities.has(currency)) return currency;
-  throw new Error(`no cash security for currency ${currency}`);
+  const securityId = holdingByCurrency.get(currency);
+  if (!securityId) throw new Error(`no cash security for currency ${currency}`);
+  return securityId;
+}
+
+/** DEBT security of a currency (card balances, loans, tax owed). */
+export async function debtSecurityFor(currency) {
+  await loadReferences();
+  const securityId = debtByCurrency.get(currency);
+  if (!securityId) throw new Error(`no DEBT security for currency ${currency}`);
+  return securityId;
 }
 
 /**

@@ -87,6 +87,8 @@ export async function calculateProxyPrices(targetDate = new Date(), options = {}
 
 // Asset types that pay distributions per unit (bonds / structured products pay coupons, not tracked here)
 const INCOME_ASSET_TYPES = ["ETF", "STOCK"];
+// Sources fetched by the price providers (priceProviders.fetchSecurityPrice)
+const PRICE_SOURCES = ["EODHD", "YAHOO", "TRUSTNET", "BOT", "BTP", "EUROTLX", "BORSA_ITALIANA", "MORNINGSTAR"];
 // Nightly lookback for dividends: catches ex-dates the feed publishes a few days late
 const INCOME_LOOKBACK_DAYS = 30;
 
@@ -164,8 +166,9 @@ export async function calculatePrices(targetDate = new Date(), options = {}) {
 
   // 1. Load active priced securities from security_master
   const queryParams = [];
+  // Only the price feeds (crypto comes from CoinMarketCap as fx rates, Allianz lines from the Allianz export)
   let whereClause = `
-    WHERE source IS NOT NULL
+    WHERE source = ANY('{${PRICE_SOURCES.join(",")}}')
   `;
 
   if (options.runOnlyThisId) {
@@ -515,7 +518,7 @@ export async function calculateCryptoDailyFx(targetDate = new Date()) {
   const result = await query(`
     SELECT c.currency_code, sm.source_id
     FROM currencies c
-    LEFT JOIN security_master sm ON sm.security_id = c.currency_code
+    LEFT JOIN security_master sm ON sm.currency = c.currency_code AND sm.asset_type = 'CRYPTO' AND sm.source = 'CMC'
     WHERE c.type IN ('CRYPTO', 'STABLECOIN')
       AND (c.is_active = true OR c.currency_code = 'USDC');
   `);

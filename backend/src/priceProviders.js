@@ -87,7 +87,8 @@ async function fetchFromEodhd(sec, targetDate) {
  * @returns {Promise<{security_id: string, date: string, price: number}|null>}
  */
 export async function fetchFromYahoo(sec, targetDate) {
-  const ticker = (sec.source_id || sec.security_id).trim();
+  const ticker = (sec.source_id || "").trim();
+  if (!ticker) throw new Error(`Missing source_id for ${sec.source} security ${sec.security_id}`);
   const yahooFinance = new YahooFinance();
 
   // Define 10-day lookback window
@@ -156,7 +157,8 @@ export async function fetchFromBorsaItaliana(sec, targetDate) {
   const secId = sec.security_id;
   const source = (sec.source || "").trim().toUpperCase();
   // Prefer source_id (e.g. ISIN or Morningstar ID) for URL building, fallback to security_id
-  const lookupId = (sec.source_id || sec.security_id).trim();
+  const lookupId = (sec.source_id || "").trim();
+  if (!lookupId) throw new Error(`Missing source_id for ${sec.source} security ${sec.security_id}`);
   const fallbackDate = utils.formatDateToISO(targetDate);
 
   try {
@@ -296,7 +298,8 @@ async function fetchDividendsFromEodhd(sec, from, to) {
  * @returns {Promise<Array<{ex_date: string, pay_date: null, amount: number, currency: string}>>}
  */
 async function fetchDividendsFromYahoo(sec, from, to) {
-  const ticker = (sec.source_id || sec.security_id).trim();
+  const ticker = (sec.source_id || "").trim();
+  if (!ticker) throw new Error(`Missing source_id for ${sec.source} security ${sec.security_id}`);
   const yahooFinance = new YahooFinance();
   const result = await yahooFinance.chart(ticker, {
     period1: new Date(`${from}T00:00:00Z`),

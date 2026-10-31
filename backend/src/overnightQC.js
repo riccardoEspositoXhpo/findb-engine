@@ -572,7 +572,10 @@ export async function checkNegativeHoldings(targetDate = new Date()) {
   const dateStr = utils.formatDateToISO(targetDate);
   const { rows } = await query(
     `WITH cur AS (
-       SELECT c.currency_code, coalesce((SELECT security_id FROM security_master WHERE security_id = 'CASH_' || c.currency_code), c.currency_code) AS security_id
+       SELECT c.currency_code, coalesce(
+         (SELECT security_id FROM security_master WHERE asset_type = 'CASH' AND currency = c.currency_code LIMIT 1),
+         (SELECT security_id FROM security_master WHERE asset_type = 'CRYPTO' AND currency = c.currency_code LIMIT 1),
+         c.currency_code) AS security_id
        FROM currencies c
      ),
      moves AS (
@@ -1722,6 +1725,25 @@ export async function checkBatchWarnings(targetDate = new Date()) {
   });
 }
 
+/**
+ * S1: securities created automatically (a new ISIN / token / fund in an email, event or import) not reviewed yet: their
+ * classifications are "Other" and the provider match needs a look. Curate the row in security_master, then set
+ * reviewed = true.
+ */
+export async function checkSecuritiesToReview(targetDate = new Date()) {
+  const dateStr = utils.formatDateToISO(targetDate);
+  const { rows } = await query(
+    `SELECT security_id, security_description AS description, asset_type, source, source_id, review_note
+     FROM security_master WHERE NOT reviewed ORDER BY created_at;`,
+  );
+  return qcResult("checkSecuritiesToReview", dateStr, rows, {
+    severity: "WARNING",
+    ok: "No security waiting for review.",
+    fail: (n) => `${n} new security(ies) to review.`,
+    message: "Created automatically: check the provider match, set asset class / region / classification, then reviewed = true:",
+  });
+}
+
 export const overnightQC = {
   hasCryptoRunToday,
   hasFxRunToday,
@@ -1767,6 +1789,7 @@ export const overnightQC = {
   checkLookthroughCoverage,
   checkBatchErrors,
   checkBatchWarnings,
+  checkSecuritiesToReview,
   runAll,
 };
 
@@ -1826,6 +1849,8 @@ async function runAll(targetDate = new Date()) {
     // batch log
     checkBatchErrors(targetDate),
     checkBatchWarnings(targetDate),
+    // securities
+    checkSecuritiesToReview(targetDate),
   ]);
 
   return { results };
