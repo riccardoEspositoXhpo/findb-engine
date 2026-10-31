@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { batchLog } from "./batchLog.js";
 import { utils } from "./utils.js";
 import { importDatabase, query, replaceDataInDb, withSavepoint } from "./db.js";
 import { loadFxRates, currencyConverter } from "./marketData.js";
@@ -75,14 +76,12 @@ export async function run(targetDate = new Date(), options = {}) {
           valued = await runCustom(portfolio, dateStr);
           break;
         default:
-          console.warn(
-            `[VALUATION] ${portfolioId}: no valuation method (${portfolio.valuation_method}), skipping.`,
-          );
+          batchLog.warn("valuation", portfolioId, `no valuation method (${portfolio.valuation_method}), skipped.`);
       }
       (valued ? summary.valued : summary.skipped).push(portfolioId);
     } catch (error) {
       // GAS emailed "Portfolio X failed to run" and moved on to the next portfolio
-      console.error(`[VALUATION] ${portfolioId} failed:`, error.message);
+      batchLog.error("valuation", portfolioId, `failed: ${error.message}`);
       summary.failed.push(portfolioId);
     }
   }
@@ -408,9 +407,7 @@ export async function rollPortfolio(
 export async function runBalance(portfolio, dateStr) {
   const balance = Number(portfolio.balance);
   if (!balance) {
-    console.warn(
-      `[VALUATION] ${portfolio.portfolio_id}: missing or zero balance (${portfolio.balance}), skipping.`,
-    );
+    batchLog.warn("valuation", portfolio.portfolio_id, `missing or zero balance (${portfolio.balance}), skipped.`);
     return false;
   }
   return runOneLinePortfolio(
@@ -537,9 +534,7 @@ export async function runCustom(portfolio, dateStr) {
       console.log(`[VALUATION] ${portfolio.portfolio_id}: valued by taxes.run after valuation.`);
       return false;
     default:
-      console.warn(
-        `[VALUATION] ${portfolio.portfolio_id}: CUSTOM not migrated yet, skipping.`,
-      );
+      batchLog.warn("valuation", portfolio.portfolio_id, "CUSTOM not migrated yet, skipped.");
       return false;
   }
 }
@@ -595,9 +590,7 @@ export async function runKraken(portfolio, dateStr) {
   await syncKrakenLedger(portfolio, dateStr);
 
   if (dateStr !== utils.formatDateToISO(new Date())) {
-    console.warn(
-      `[VALUATION] KRAKEN: balance is only available for today, no positions written for ${dateStr}.`,
-    );
+    batchLog.warn("valuation", "KRAKEN", `balance is only available for today, no positions written for ${dateStr}.`);
     return false;
   }
 
@@ -763,9 +756,7 @@ export async function runKraken(portfolio, dateStr) {
       const received = legs.find((leg) => leg.amount > 0);
       const given = legs.find((leg) => leg.amount < 0);
       if (legs.length !== 2 || !received || !given) {
-        console.warn(
-          `[VALUATION] KRAKEN: trade ${refid} has unbalanced legs, skipped.`,
-        );
+        batchLog.warn("valuation", "KRAKEN", `trade ${refid} has unbalanced legs, skipped.`);
         continue;
       }
 
@@ -886,9 +877,7 @@ export async function runCryptoCom(portfolio, dateStr) {
     try {
       files = await readLabelAttachments("cryptocom", /\.csv$/i);
     } catch (error) {
-      console.warn(
-        `[VALUATION] CRYPTO_COM: Gmail read failed (${error.message}), valuing the ledger already saved.`,
-      );
+      batchLog.warn("valuation", "CRYPTO_COM", `Gmail read failed (${error.message}), valued the ledger already saved.`);
       return null;
     }
 
@@ -1036,9 +1025,7 @@ export async function runAllianz(portfolio, dateStr) {
         file.filename,
       );
   } catch (error) {
-    console.warn(
-      `[VALUATION] ALLIANZ: Gmail read failed (${error.message}), valuing the ledger already saved.`,
-    );
+    batchLog.warn("valuation", "ALLIANZ", `Gmail read failed (${error.message}), valued the ledger already saved.`);
   }
   return runRoll(portfolio, dateStr);
 
@@ -1073,9 +1060,7 @@ export async function runAllianz(portfolio, dateStr) {
       "Valore Quota",
     ].map(col);
     if ([valueDate, kind, amount, line, units, unitPrice].includes(-1)) {
-      console.warn(
-        `[VALUATION] ALLIANZ: ${filename} is not an Allianz export (header ${JSON.stringify(header)}), skipped.`,
-      );
+      batchLog.warn("valuation", "ALLIANZ", `${filename} is not an Allianz export (header ${JSON.stringify(header)}), skipped.`);
       return 0;
     }
 
@@ -1182,7 +1167,7 @@ export async function runTradeRepublic(portfolio, dateStr) {
     for (const file of await readLabelAttachments("tradeRepublic", /\.csv$/i)) await importTradeRepublicCsv(file);
   } catch (error) {
     if (/unknown Trade Republic type/.test(error.message)) throw error;
-    console.warn(`[VALUATION] TRADE_REPUBLIC: Gmail read failed (${error.message}), valuing the ledger already saved.`);
+    batchLog.warn("valuation", "TRADE_REPUBLIC", `Gmail read failed (${error.message}), valued the ledger already saved.`);
   }
   return runRoll(portfolio, dateStr);
 
@@ -1190,7 +1175,7 @@ export async function runTradeRepublic(portfolio, dateStr) {
     const portfolioId = portfolio.portfolio_id;
     const rows = utils.parseCsv(file.content.toString("utf-8")).filter((row) => row.date && row.date <= dateStr);
     if (!rows.length || !("transaction_id" in rows[0]) || !("type" in rows[0])) {
-      console.warn(`[VALUATION] TRADE_REPUBLIC: ${file.filename} is not a Trade Republic export, skipped.`);
+      batchLog.warn("valuation", "TRADE_REPUBLIC", `${file.filename} is not a Trade Republic export, skipped.`);
       return;
     }
     const num = (value) => (value ? Number(value) : 0);

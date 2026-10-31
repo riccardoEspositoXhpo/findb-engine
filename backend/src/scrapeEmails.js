@@ -1,4 +1,5 @@
 import { ImapFlow } from "imapflow";
+import { batchLog } from "./batchLog.js";
 import { simpleParser } from "mailparser";
 import { utils } from "./utils.js";
 import { query } from "./db.js";
@@ -42,7 +43,7 @@ export async function run(targetDate = new Date()) {
   const summary = { read: 0, created: 0, unparsed: 0 };
 
   if (!config.targetEmailRecipient || !config.smtpPassword) {
-    console.error("[SCRAPE EMAILS] TARGET_EMAIL_RECIPIENT / SMTP_PASS not set, skipping.");
+    batchLog.error("scrapeEmails", null, "TARGET_EMAIL_RECIPIENT / SMTP_PASS not set, skipped.");
     return summary;
   }
 
@@ -65,7 +66,7 @@ export async function run(targetDate = new Date()) {
         const events = source.parse(email, source.portfolioId);
         if (events === null) continue; // ignored on purpose (e.g. emails forwarded by the user)
         if (events.length === 0) {
-          console.warn(`[SCRAPE EMAILS] ${label}: could not parse "${email.subject}" (${email.date}), skipped.`);
+          batchLog.warn("scrapeEmails", label, `could not parse "${email.subject}" (${email.date}), skipped.`);
           summary.unparsed++;
           continue;
         }
@@ -79,7 +80,7 @@ export async function run(targetDate = new Date()) {
       }
     }
   } catch (error) {
-    console.error("[SCRAPE EMAILS] Gmail scrape failed, continuing with the events already in the DB:", error.message);
+    batchLog.error("scrapeEmails", null, `Gmail scrape failed, continued with the events already in the DB: ${error.message}`);
   } finally {
     await client.logout().catch(() => {});
   }
@@ -104,7 +105,7 @@ async function dropRepeatedOrders(candidates) {
     if (!orderId) return true;
     const known = seen.get(orderId);
     if (known && (Number(known.quantity) !== Number(event.quantity) || Math.abs(Number(known.price) - Number(event.price)) > 1e-9)) {
-      console.warn(`[SCRAPE EMAILS] order ${orderId} seen again with different numbers (${known.quantity} @ ${known.price} vs ${event.quantity} @ ${event.price}), kept the first.`);
+      batchLog.warn("scrapeEmails", "directa", `order ${orderId} seen again with different numbers (${known.quantity} @ ${known.price} vs ${event.quantity} @ ${event.price}), kept the first.`);
     }
     if (known) return false;
     seen.set(orderId, event);
@@ -123,7 +124,7 @@ async function readLabel(client, label, dateStr) {
   try {
     lock = await client.getMailboxLock(label, { readOnly: true });
   } catch (error) {
-    console.warn(`[SCRAPE EMAILS] Gmail label "${label}" not found, skipped.`);
+    batchLog.warn("scrapeEmails", label, "Gmail label not found, skipped.");
     return [];
   }
 
@@ -306,7 +307,7 @@ export function parseDirecta(email, portfolioId) {
     if (!order || !operation || !isin || fills.length === 0 || !value) continue;
     const securityId = DIRECTA_ISINS[isin];
     if (!securityId) {
-      console.warn(`[SCRAPE EMAILS] directa: unknown ISIN ${isin} (order ${order}), add it to DIRECTA_ISINS.`);
+      batchLog.warn("scrapeEmails", "directa", `unknown ISIN ${isin} (order ${order}), add it to DIRECTA_ISINS.`);
       continue;
     }
     const [, day, month, year] = fills[0];

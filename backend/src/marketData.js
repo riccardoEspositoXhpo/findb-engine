@@ -1,4 +1,5 @@
 import { utils } from "./utils.js";
+import { batchLog } from "./batchLog.js";
 import { query, replaceDataInDb, withSavepoint } from "./db.js";
 import { config } from "../config.js";
 import { fetchSecurityPrice, fetchSecurityDividends } from "./priceProviders.js";
@@ -116,7 +117,7 @@ export async function calculateSecurityIncome(targetDate = new Date(), options =
       rows.push(...mergeDistributions(dividends.map((div) => ({ security_id: sec.security_id, ...div, source: sec.source }))));
     } catch (err) {
       // One feed failing doesn't stop the others
-      console.warn(`[INCOME] Warning: dividends of ${sec.security_id} (${sec.source}) failed: ${err.message}`);
+      batchLog.warn("marketData", sec.security_id, `dividends (${sec.source}) failed: ${err.message}`);
     }
   }
 
@@ -206,9 +207,7 @@ export async function calculatePrices(targetDate = new Date(), options = {}) {
           };
         } catch (err) {
           // Isolate single provider failures without breaking the batch
-          console.warn(
-            `[PRICES BATCH] Warning: Failed to fetch price for ${sec.security_id} (${sec.source}): ${err.message}`,
-          );
+          batchLog.warn("marketData", sec.security_id, `price fetch (${sec.source}) failed: ${err.message}`);
           return { sec, data: null };
         }
       }),
@@ -218,10 +217,7 @@ export async function calculatePrices(targetDate = new Date(), options = {}) {
       let issue = false;
       if (item.status === "rejected") {
         issue = true;
-        console.error(
-          `[PRICES BATCH] Provider error:`,
-          item.reason?.message || item.reason,
-        );
+        batchLog.error("marketData", null, `price provider error: ${item.reason?.message || item.reason}`);
         continue;
       }
 
@@ -232,9 +228,8 @@ export async function calculatePrices(targetDate = new Date(), options = {}) {
       // Filter out 0 or NaN prices (matching finalPrices filter in // securityData.gs)
       if (!data || isNaN(parsedPrice) || parsedPrice <= 0) {
         issue = true;
-        console.warn(
-          `[PRICES BATCH] Skipping invalid/zero price for ${sec.security_id}`,
-        );
+        // A failed fetch (data null) is already in the batch log
+        if (data) batchLog.warn("marketData", sec.security_id, `invalid / zero price (${data.price}), skipped.`);
         continue;
       }
 
@@ -589,9 +584,7 @@ export async function calculateCryptoDailyFx(targetDate = new Date()) {
     if (price) {
       usdPrices[sym] = Number(price);
     } else {
-      console.warn(
-        `[CRYPTO BATCH] Price missing from CMC for token "${sym}" (id ${cmcId}).`,
-      );
+      batchLog.warn("marketData", sym, `crypto price missing from CMC (id ${cmcId}).`);
     }
   }
   for (const sym of symbolFallback) {
@@ -604,7 +597,7 @@ export async function calculateCryptoDailyFx(targetDate = new Date()) {
     if (matches[0]?.quote?.USD?.price) {
       usdPrices[sym] = Number(matches[0].quote.USD.price);
     } else {
-      console.warn(`[CRYPTO BATCH] Price missing from CMC for token "${sym}".`);
+      batchLog.warn("marketData", sym, "crypto price missing from CMC.");
     }
   }
 
@@ -821,16 +814,22 @@ export async function run(targetDate = new Date()) {
   );
   const startTime = performance.now();
 
-  // Parallel network I/O execution for maximum throughput
-  const [fiatRecords, cryptoRecords, priceRecords] = await Promise.all([
-    calculateDailyFx(targetDate),
-    calculateCryptoDailyFx(targetDate),
-    calculatePrices(targetDate),
-    calculateSecurityIncome(targetDate),
-  ]);
+  // Parallel network I/O; each source fails on its own (a CMC outage still writes the ECB rates and the prices):
+  // a failure goes to the batch log, the batch carries on with the data already in the DB
+  const sources = { "fiat fx": calculateDailyFx, "crypto fx": calculateCryptoDailyFx, prices: calculatePrices, income: calculateSecurityIncome };
+  const settled = await Promise.allSettled(Object.values(sources).map((fn) => fn(targetDate)));
+  const [fiatRecords, cryptoRecords, priceRecords] = settled.map((result, i) => {
+    if (result.status === "fulfilled") return result.value ?? [];
+    batchLog.error("marketData", Object.keys(sources)[i], result.reason?.message ?? String(result.reason));
+    return [];
+  });
 
   // Proxied securities move with their proxy's prices just written
-  await calculateProxyPrices(targetDate);
+  try {
+    await calculateProxyPrices(targetDate);
+  } catch (error) {
+    batchLog.error("marketData", "proxy prices", error.message);
+  }
 
   // New rates were just written: reload the in-memory fx cache for everything downstream
   await loadFxRates({ force: true });

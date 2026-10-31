@@ -1,5 +1,6 @@
 // src/overnightQC.js
 import { query } from "./db.js";
+import { batchLog } from "./batchLog.js";
 import { utils } from "./utils.js";
 import { loadFxRates, currencyConverter } from "./marketData.js";
 import { ledger, OUTFLOW_TYPES } from "./ledger.js";
@@ -1695,6 +1696,32 @@ export async function checkLookthroughCoverage(targetDate = new Date()) {
   });
 }
 
+// ============================================================================
+// BATCH LOG (user, 2026-10-31)
+// ============================================================================
+
+const batchRows = (level) => batchLog.entries(level).map(({ step, entity, message }) => ({ step, entity, message }));
+
+/** BL1: errors of tonight's batch (a step that crashed twice, a portfolio / event / feed that failed): something didn't run. */
+export async function checkBatchErrors(targetDate = new Date()) {
+  return qcResult("checkBatchErrors", utils.formatDateToISO(targetDate), batchRows("ERROR"), {
+    severity: "CRITICAL",
+    ok: "The batch ran without errors.",
+    fail: (n) => `${n} error(s) in tonight's batch.`,
+    message: "Failed during the batch (the rest carried on with the data already in the DB):",
+  });
+}
+
+/** BL2: warnings of tonight's batch (skips, unparsed emails, missing prices, a step that needed its retry). */
+export async function checkBatchWarnings(targetDate = new Date()) {
+  return qcResult("checkBatchWarnings", utils.formatDateToISO(targetDate), batchRows("WARNING"), {
+    severity: "WARNING",
+    ok: "The batch ran without warnings.",
+    fail: (n) => `${n} warning(s) in tonight's batch.`,
+    message: "Skipped or degraded during the batch:",
+  });
+}
+
 export const overnightQC = {
   hasCryptoRunToday,
   hasFxRunToday,
@@ -1738,6 +1765,8 @@ export const overnightQC = {
   hasBreakdownsRunToday,
   checkBreakdownOther,
   checkLookthroughCoverage,
+  checkBatchErrors,
+  checkBatchWarnings,
   runAll,
 };
 
@@ -1794,6 +1823,9 @@ async function runAll(targetDate = new Date()) {
     hasBreakdownsRunToday(targetDate),
     checkBreakdownOther(targetDate),
     checkLookthroughCoverage(targetDate),
+    // batch log
+    checkBatchErrors(targetDate),
+    checkBatchWarnings(targetDate),
   ]);
 
   return { results };

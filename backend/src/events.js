@@ -1,4 +1,5 @@
 import { utils } from "./utils.js";
+import { batchLog } from "./batchLog.js";
 import { query, replaceDataInDb, withSavepoint } from "./db.js";
 import { loadFxRates, currencyConverter } from "./marketData.js";
 import { ledger } from "./ledger.js";
@@ -519,9 +520,7 @@ export async function processEvents(dateStr) {
   for (const event of pendingEvents) {
     const handler = EVENT_HANDLERS[event.event_type];
     if (!handler) {
-      console.warn(
-        `[EVENTS] Unknown event type ${event.event_type} (event ${event.event_id}), left pending.`,
-      );
+      batchLog.warn("events", event.portfolio_id, `unknown event type ${event.event_type} (event ${event.event_id}), left pending.`);
       summary.pending++;
       continue;
     }
@@ -539,10 +538,7 @@ export async function processEvents(dateStr) {
       if (processed) summary.processed++;
       else summary.pending++;
     } catch (error) {
-      console.error(
-        `[EVENTS] Event ${event.event_id} (${event.event_type} ${event.portfolio_id}) failed:`,
-        error.message,
-      );
+      batchLog.error("events", event.portfolio_id, `event ${event.event_id} (${event.event_type}) failed: ${error.message}`);
       summary.failed++;
     }
   }

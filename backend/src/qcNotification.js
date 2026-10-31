@@ -258,7 +258,12 @@ function renderDynamicData(data) {
             .map(
               (row) => `
             <tr style="border-top: 1px solid ${M3.outlineVariant}; color: ${M3.onSurface};">
-              ${columns.map((col) => `<td style="padding: 8px 12px; font-family: 'Roboto Mono', monospace; white-space: nowrap;">${row[col] !== null && row[col] !== undefined ? row[col] : ""}</td>`).join("")}
+              ${columns.map((col) => {
+                const value = row[col] !== null && row[col] !== undefined ? row[col] : "";
+                // Long text (batch log messages) wraps; numbers / ids stay on one line
+                const wrap = String(value).length > 40 ? "white-space: normal; min-width: 240px; word-break: break-word;" : "white-space: nowrap;";
+                return `<td style="padding: 8px 12px; font-family: 'Roboto Mono', monospace; ${wrap}">${value}</td>`;
+              }).join("")}
             </tr>
           `,
             )
@@ -334,4 +339,86 @@ export async function sendHtmlEmail(subject, html) {
     subject,
     html,
   });
+}
+
+/**
+ * Crash email: the batch died before (or while) sending the QC digest. The error and the batch log so far.
+ *
+ * @param {Error} error
+ * @param {Array<Object>} entries - batchLog.entries()
+ * @param {Date|string} [targetDate=new Date()]
+ */
+export async function sendCrashEmail(error, entries, targetDate = new Date()) {
+  console.log(`[QC NOTIFIER] Dispatching crash email to ${config.targetEmailRecipient}...`);
+  await sendHtmlEmail("findb-engine: batch CRASHED [ACTION REQUIRED]", buildCrashEmailHtml(error, entries, targetDate));
+  console.log(`[QC NOTIFIER] Crash email dispatched.`);
+}
+
+export function buildCrashEmailHtml(error, entries, targetDate = new Date()) {
+  const dateStr = targetDate instanceof Date ? targetDate.toISOString().split("T")[0] : targetDate;
+  const rows = entries.map(({ level, step, entity, message }) => ({ level, step, entity, message }));
+  const escape = (text) => String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light">
+  <title>FinDB batch crashed - ${dateStr}</title>
+  <style>
+    body { margin: 0 !important; padding: 0 !important; background-color: ${M3.surface}; }
+    @media only screen and (max-width: 600px) { .section { padding-left: 16px !important; padding-right: 16px !important; } }
+  </style>
+</head>
+<body style="margin: 0; padding: 0; background-color: ${M3.surface};">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${M3.surface}" style="background-color: ${M3.surface}; width: 100%;">
+    <tr>
+      <td align="center" style="padding: 24px 8px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${M3.surfaceContainerLow}" style="width: 100%; max-width: 640px; table-layout: fixed; background-color: ${M3.surfaceContainerLow}; border-radius: 28px; font-family: ${M3_FONT}; color: ${M3.onSurface};">
+          <tr>
+            <td class="section" style="padding: 24px 24px 8px 24px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+                <td valign="middle">
+                  <div style="font-size: 22px; line-height: 28px; color: ${M3.onSurface};">Batch crashed</div>
+                  <div style="font-size: 14px; line-height: 20px; color: ${M3.onSurfaceVariant}; margin-top: 2px;">Valuation date ${dateStr}</div>
+                </td>
+                <td valign="middle" align="right">
+                  <span style="display: inline-block; padding: 8px 16px; border-radius: 8px; background-color: ${M3.error}; color: ${M3.onError}; font-size: 14px; font-weight: 500; white-space: nowrap;">ACTION REQUIRED</span>
+                </td>
+              </tr></table>
+            </td>
+          </tr>
+          <tr>
+            <td class="section" style="padding: 16px 24px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${M3.errorContainer}" style="background-color: ${M3.errorContainer}; border-radius: 16px;">
+                <tr><td style="padding: 16px 20px; color: ${M3.onErrorContainer};">
+                  <div style="font-size: 14px; font-weight: 500;">The QC email did not go out. Error:</div>
+                  <div style="font-family: 'Roboto Mono', monospace; font-size: 12px; line-height: 18px; margin-top: 8px; word-break: break-word;">${escape(error?.message ?? error)}</div>
+                </td></tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td class="section" style="padding: 8px 24px 16px 24px;">
+              <div style="margin: 0 0 8px 4px; font-size: 14px; font-weight: 500; color: ${M3.primary};">Batch log</div>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${M3.surfaceContainerLowest}" style="table-layout: fixed; background-color: ${M3.surfaceContainerLowest}; border-radius: 16px;">
+                <tr><td style="padding: 16px;">
+                  ${rows.length ? renderDynamicData(rows) : `<div style="font-size: 14px; color: ${M3.onSurfaceVariant};">Nothing logged before the crash.</div>`}
+                </td></tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td class="section" style="padding: 16px 24px 24px 24px; border-top: 1px solid ${M3.outlineVariant}; font-size: 12px; color: ${M3.outline}; text-align: center;">
+              findb-engine &bull; daily batch &bull; Cloud Run logs have the stack trace
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+  `.trim();
 }

@@ -1,4 +1,5 @@
 import { utils } from "./utils.js";
+import { batchLog } from "./batchLog.js";
 import { query, withSavepoint } from "./db.js";
 import { loadFxRates, currencyConverter } from "./marketData.js";
 
@@ -89,6 +90,9 @@ export async function run(targetDate = new Date(), options = {}) {
     totals.aggregates += result.counts.aggregates;
     totals.failures.push(...result.failures);
   }
+  // One batch log error per security (a broken series fails every day of a backfill the same way)
+  for (const [securityId, failures] of Object.entries(Object.groupBy(totals.failures, (failure) => failure.security_id)))
+    batchLog.error("risk", securityId, `${failures.length} day(s) without a return vector: ${failures[0].error}`);
   console.log(
     `[RISK] Done: ${totals.dates} day(s), ${totals.securities} security / ${totals.portfolios} portfolio / ${totals.aggregates} aggregate snapshots, ${totals.failures.length} failure(s).`,
   );
