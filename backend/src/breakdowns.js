@@ -237,7 +237,8 @@ const activeOn = (intervals, date) =>
 
 /**
  * Security breakdowns as of today: the security_master attributes (100% of one sector) and the lookthrough shapes
- * (_LT: lookthrough_data active today, else the attribute; the gap to 100 goes to "Other"). A change starts a new
+ * (_LT: lookthrough_data active today, else the lookthrough_proxy's data / attributes, else the attribute; the gap to
+ * 100 goes to "Other"). A change starts a new
  * interval today (history kept).
  *
  * @param {Date|string} [targetDate=new Date()]
@@ -256,6 +257,7 @@ export async function runSecurityBreakdowns(targetDate = new Date()) {
     `SELECT * FROM security_master WHERE asset_type <> ALL($1) ORDER BY security_id;`,
     [EXCLUDED_ASSET_TYPES],
   );
+  const byId = new Map(securities.map((security) => [security.security_id, security]));
   const lookthrough = await loadIntervals("lookthrough_data", "security_id");
   const writer = await intervalWriter("security_breakdowns", "security_id");
   for (const security of securities) {
@@ -272,17 +274,20 @@ export async function runSecurityBreakdowns(targetDate = new Date()) {
           { date: dateStr, sectors: new Map([[value, 100]]) },
         ]);
     }
+    // Lookthrough: the security's own data, else its lookthrough_proxy's (the proxy's data, else the proxy's
+    // attributes), else its own attributes (100% "lookthrough off")
+    const proxy = security.lookthrough_proxy ? byId.get(security.lookthrough_proxy) : null;
     for (const dimension of LOOKTHROUGH) {
-      const rows = activeOn(
-        lookthrough.get(`${security.security_id}|${dimension}`),
-        dateStr,
-      );
+      const lookthroughOf = (id) => activeOn(lookthrough.get(`${id}|${dimension}`), dateStr);
+      const attribute = SINGLE_SECURITY[dimension.replace(/_LT$/, "")];
+      const own = lookthroughOf(security.security_id);
+      const rows = own.length ? own : proxy ? lookthroughOf(proxy.security_id) : [];
       const sectors = new Map();
       if (rows.length)
         for (const row of rows)
           sectors.set(row.sector, (sectors.get(row.sector) ?? 0) + row.weight);
       else {
-        const value = security[SINGLE_SECURITY[dimension.replace(/_LT$/, "")]];
+        const value = (proxy ?? security)[attribute];
         if (!value) continue;
         sectors.set(value, 100);
       }

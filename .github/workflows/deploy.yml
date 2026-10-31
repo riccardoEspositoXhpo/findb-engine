@@ -9,6 +9,7 @@ env:
   PROJECT_ID: findb-engine
   REGION: europe-west1
   JOB_NAME: findb-nitejob
+  MONTHLY_JOB_NAME: findb-monthjob
 
 jobs:
   deploy:
@@ -37,6 +38,26 @@ jobs:
       - name: Test Cloud Run Job
         run: |
           gcloud run jobs execute ${{ env.JOB_NAME }} \
+            --region ${{ env.REGION }} \
+            --update-env-vars DRY_RUN=true \
+            --wait
+
+      # Monthly job (lookthrough): a copy of the daily job just deployed (image, env / secrets, service account,
+      # timeout) with its own entry point, so the two never drift apart
+      - name: Deploy Monthly Cloud Run Job
+        run: |
+          gcloud run jobs describe ${{ env.JOB_NAME }} --region ${{ env.REGION }} --format export > monthly-job.yaml
+          yq -i '
+            .metadata.name = "${{ env.MONTHLY_JOB_NAME }}" |
+            del(.metadata.annotations) | del(.metadata.labels) |
+            .spec.template.spec.template.spec.containers[0].command = ["node"] |
+            .spec.template.spec.template.spec.containers[0].args = ["backend/jobs/monthlyBatch.js"]
+          ' monthly-job.yaml
+          gcloud run jobs replace monthly-job.yaml --region ${{ env.REGION }}
+
+      - name: Test Monthly Cloud Run Job
+        run: |
+          gcloud run jobs execute ${{ env.MONTHLY_JOB_NAME }} \
             --region ${{ env.REGION }} \
             --update-env-vars DRY_RUN=true \
             --wait

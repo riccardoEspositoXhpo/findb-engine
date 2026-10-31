@@ -5,6 +5,7 @@
   "scripts": {
     "start": "node backend/jobs/dailyBatch.js",
     "test:batch": "node --env-file=.env.local backend/jobs/dailyBatch.js",
+    "test:monthly": "node --env-file=.env.local backend/jobs/monthlyBatch.js",
     "db:migrate": "node backend/scripts/migrate.js",
     "qc": "vitest run backend/tests/overnight.qc.test.js"
   },

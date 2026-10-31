@@ -14,6 +14,7 @@ export const utils = {
   convertItalianFloat,
   doesItRunToday,
   readXls,
+  readXlsx,
   readPdfText,
   parseCsv,
 };
@@ -490,6 +491,55 @@ function readXls(buffer) {
     workbookSheets[name] = Array.from({ length: rows }, (_, r) => Array.from({ length: cols }, (_, c) => sheet.get(`${r},${c}`) ?? ""));
   });
   return workbookSheets;
+}
+
+/**
+ * Minimal reader for .xlsx files (a zip of XML parts), no dependency: enough for issuer holdings exports (Xtrackers).
+ * Reads shared strings, inline strings and numbers; no formulas, formats or dates.
+ *
+ * @param {Buffer} buffer - The .xlsx file
+ * @returns {Object<string, Array<Array<string|number>>>} worksheet part name (sheet1, ...) -> rows of cells ("" when empty)
+ */
+function readXlsx(buffer) {
+  // Zip central directory (end record: last 0x06054b50) -> each entry's local header -> stored / deflated data
+  let end = buffer.length - 22;
+  while (end >= 0 && buffer.readUInt32LE(end) !== 0x06054b50) end--;
+  if (end < 0) throw new Error("readXlsx: not a zip file");
+  const parts = new Map();
+  for (let o = buffer.readUInt32LE(end + 16), n = buffer.readUInt16LE(end + 10); n > 0; n--) {
+    const method = buffer.readUInt16LE(o + 10);
+    const size = buffer.readUInt32LE(o + 20);
+    const nameLength = buffer.readUInt16LE(o + 28);
+    const name = buffer.subarray(o + 46, o + 46 + nameLength).toString("utf8");
+    const local = buffer.readUInt32LE(o + 42);
+    const start = local + 30 + buffer.readUInt16LE(local + 26) + buffer.readUInt16LE(local + 28);
+    const data = buffer.subarray(start, start + size);
+    parts.set(name, method === 8 ? zlib.inflateRawSync(data) : data);
+    o += 46 + nameLength + buffer.readUInt16LE(o + 30) + buffer.readUInt16LE(o + 32);
+  }
+  // Tags may carry a namespace prefix (x:c, x:v)
+  const unescape = (text) =>
+    text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+  const texts = (xml) => [...xml.matchAll(/<(?:\w+:)?t(?:\s[^>]*)?>([\s\S]*?)<\/(?:\w+:)?t>/g)].map((m) => unescape(m[1])).join("");
+  const shared = [...(parts.get("xl/sharedStrings.xml")?.toString("utf8") ?? "").matchAll(/<(?:\w+:)?si>([\s\S]*?)<\/(?:\w+:)?si>/g)].map((m) => texts(m[1]));
+  const column = (letters) => [...letters].reduce((index, letter) => index * 26 + letter.charCodeAt(0) - 64, 0) - 1;
+  const sheets = {};
+  for (const [name, data] of parts) {
+    const sheet = name.match(/^xl\/worksheets\/(\w+)\.xml$/)?.[1];
+    if (!sheet) continue;
+    const rows = [];
+    for (const m of data.toString("utf8").matchAll(/<(?:\w+:)?c r="([A-Z]+)(\d+)"([^>]*?)(?:\/>|>([\s\S]*?)<\/(?:\w+:)?c>)/g)) {
+      const [, letters, rowNumber, attributes, inner = ""] = m;
+      const type = attributes.match(/t="(\w+)"/)?.[1];
+      const raw = inner.match(/<(?:\w+:)?v>([\s\S]*?)<\/(?:\w+:)?v>/)?.[1];
+      const value =
+        type === "s" ? shared[Number(raw)] : type === "inlineStr" ? texts(inner) : type === "str" ? unescape(raw ?? "") : raw === undefined ? "" : Number(raw);
+      const row = (rows[Number(rowNumber) - 1] ??= []);
+      row[column(letters)] = value;
+    }
+    sheets[sheet] = Array.from(rows, (row) => Array.from(row ?? [], (cell) => cell ?? ""));
+  }
+  return sheets;
 }
 
 /**

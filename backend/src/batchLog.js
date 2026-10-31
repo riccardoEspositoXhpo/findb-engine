@@ -1,8 +1,8 @@
 /**
  * Batch log: every error / warning of the nightly batch in one place, so nothing fails silently (user, 2026-10-31).
- * The step wrapper in dailyBatch.js records a whole step crashing; the steps record their own per-entity failures
+ * The step wrapper (runStep, batchRunner.js) records a whole step crashing; the steps record their own per-entity failures
  * (a portfolio, an event, a price feed) and skips. The QC checks checkBatchErrors (CRITICAL) / checkBatchWarnings
- * (WARNING) put them in the QC email; the crash email (dailyBatch.js) lists them when QC can't run.
+ * (WARNING) put them in the QC email; the crash email (batchRunner.js / dailyBatch.js) lists them when QC can't run.
  * In memory: one batch = one process.
  */
 const entries = [];

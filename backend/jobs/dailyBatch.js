@@ -2,13 +2,11 @@
  * findb-engine daily batch process.
  *
  * - Master orchestrator for production cycle.
- * - Nothing stops the batch: every step runs through runStep (retry once, then batch log); the QC email reports the
+ * - Nothing stops the batch: every step runs through runStep (batchRunner.js: retry once, then batch log); the QC email reports the
  *   batch log, a crash email goes out when QC can't (or when the batch dies outside the steps).
- * - Supports end-to-end dry run verification via transaction rollback.
- * - Handles graceful database pool termination and exit codes.
+ * - Dry run (transaction rollback), crash email, pool teardown and exit codes: runJob (batchRunner.js).
  */
 
-import { pool, withTransaction, withSavepoint } from "../src/db.js";
 import { config } from "../config.js";
 import { overnightQC } from "../src/overnightQC.js";
 import { marketData } from "../src/marketData.js";
@@ -21,32 +19,9 @@ import { performance } from "../src/performance.js";
 import { risk } from "../src/risk.js";
 import { breakdowns } from "../src/breakdowns.js";
 import { sendQcEmail, sendCrashEmail } from "../src/qcNotification.js";
+import { runStep, runJob } from "../src/batchRunner.js";
 import { batchLog } from "../src/batchLog.js";
 import { dailyStats } from "../src/dailyStats.js";
-
-// A failing step is retried once after this pause (GAS retried every step twice)
-const RETRY_DELAY_MS = 10_000;
-
-/**
- * Runs one batch step so that nothing stops the batch (user, 2026-10-31): a throw is retried once, then recorded in
- * the batch log (QC email: checkBatchErrors) and the batch moves on with the data already in the DB. In a dry run the
- * step runs in a savepoint: a failed query would otherwise abort the whole rollback transaction for the steps after.
- *
- * @returns {Promise<*>} the step's result, or undefined when it failed twice
- */
-async function runStep(name, fn) {
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      const result = await (config.dryRun ? withSavepoint(fn) : fn());
-      if (attempt === 2) batchLog.warn(name, null, "failed on the first attempt, the retry succeeded.");
-      return result;
-    } catch (error) {
-      console.error(`[FinDB Daily Batch] ${name} failed (attempt ${attempt}):`, error);
-      if (attempt === 2) batchLog.error(name, null, `step crashed twice, skipped: ${error.message}`);
-      else await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
-    }
-  }
-}
 
 async function executePipeline() {
   const date = config.date;
@@ -111,53 +86,4 @@ async function executePipeline() {
   await runStep("netWorthEmail", () => dailyStats.run(date));
 }
 
-async function runDailyBatch() {
-  const startTime = Date.now();
-  let exitCode = 0;
-  console.log(
-    `=== [FinDB Daily Batch] Starting execution (dryRun=${Boolean(config.dryRun)}) ===`,
-  );
-
-  try {
-    if (config.dryRun) {
-      // Execute the entire pipeline end-to-end within an isolated transaction that rolls back cleanly
-      await withTransaction(executePipeline, { rollback: true });
-    } else {
-      // Production live execution: commits as each process writes
-      await executePipeline();
-    }
-
-    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-    console.log(
-      `=== [FinDB Daily Batch] Completed successfully in ${duration}s ===`,
-    );
-  } catch (error) {
-    console.error(
-      "=== [FinDB Daily Batch] Fatal error during execution ===",
-      error,
-    );
-    exitCode = 1; // Mark process as failed for Cloud Run / GitHub Actions alerting
-    // Something outside the steps died (database unreachable, ...): the QC email never went out, send the crash email
-    if (!config.dryRun)
-      await sendCrashEmail(error, batchLog.entries(), config.date).catch((emailError) =>
-        console.error("[FinDB Daily Batch] Crash email failed too:", emailError),
-      );
-  } finally {
-    // Teardown: drain pool connections cleanly before process termination
-    try {
-      console.log("[FinDB Daily Batch] Draining database pool connections...");
-      await pool.end();
-    } catch (poolError) {
-      console.error(
-        "[FinDB Daily Batch] Error while ending connection pool:",
-        poolError,
-      );
-      exitCode = 1;
-    }
-
-    // Guaranteed termination signal for container runtime
-    process.exit(exitCode);
-  }
-}
-
-runDailyBatch();
+runJob("Daily Batch", executePipeline);

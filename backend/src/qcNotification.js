@@ -233,14 +233,13 @@ function renderDetailCard(c, status, label) {
 }
 
 /**
- * Dynamically synthesizes an HTML table capped at 10 rows to prevent Gmail clipping.
+ * Dynamically synthesizes an HTML table capped at maxRows rows (10: QC details) to prevent Gmail clipping.
  */
-function renderDynamicData(data) {
+export function renderDynamicData(data, maxRows = 10) {
   if (!data) return "";
 
   if (Array.isArray(data) && data.length > 0 && typeof data[0] === "object") {
     const columns = Object.keys(data[0]);
-    const maxRows = 10;
     const isTruncated = data.length > maxRows;
     const displayRows = isTruncated ? data.slice(0, maxRows) : data;
 
@@ -347,14 +346,16 @@ export async function sendHtmlEmail(subject, html) {
  * @param {Error} error
  * @param {Array<Object>} entries - batchLog.entries()
  * @param {Date|string} [targetDate=new Date()]
+ * @param {string} [label="Daily Batch"] - the job that crashed
  */
-export async function sendCrashEmail(error, entries, targetDate = new Date()) {
+export async function sendCrashEmail(error, entries, targetDate = new Date(), label = "Daily Batch") {
   console.log(`[QC NOTIFIER] Dispatching crash email to ${config.targetEmailRecipient}...`);
-  await sendHtmlEmail("findb-engine: batch CRASHED [ACTION REQUIRED]", buildCrashEmailHtml(error, entries, targetDate));
+  const job = label === "Daily Batch" ? "batch" : label.toLowerCase();
+  await sendHtmlEmail(`findb-engine: ${job} CRASHED [ACTION REQUIRED]`, buildCrashEmailHtml(error, entries, targetDate, label));
   console.log(`[QC NOTIFIER] Crash email dispatched.`);
 }
 
-export function buildCrashEmailHtml(error, entries, targetDate = new Date()) {
+export function buildCrashEmailHtml(error, entries, targetDate = new Date(), label = "Daily Batch") {
   const dateStr = targetDate instanceof Date ? targetDate.toISOString().split("T")[0] : targetDate;
   const rows = entries.map(({ level, step, entity, message }) => ({ level, step, entity, message }));
   const escape = (text) => String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -380,7 +381,7 @@ export function buildCrashEmailHtml(error, entries, targetDate = new Date()) {
             <td class="section" style="padding: 24px 24px 8px 24px;">
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
                 <td valign="middle">
-                  <div style="font-size: 22px; line-height: 28px; color: ${M3.onSurface};">Batch crashed</div>
+                  <div style="font-size: 22px; line-height: 28px; color: ${M3.onSurface};">${label} crashed</div>
                   <div style="font-size: 14px; line-height: 20px; color: ${M3.onSurfaceVariant}; margin-top: 2px;">Valuation date ${dateStr}</div>
                 </td>
                 <td valign="middle" align="right">
@@ -393,7 +394,7 @@ export function buildCrashEmailHtml(error, entries, targetDate = new Date()) {
             <td class="section" style="padding: 16px 24px;">
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${M3.errorContainer}" style="background-color: ${M3.errorContainer}; border-radius: 16px;">
                 <tr><td style="padding: 16px 20px; color: ${M3.onErrorContainer};">
-                  <div style="font-size: 14px; font-weight: 500;">The QC email did not go out. Error:</div>
+                  <div style="font-size: 14px; font-weight: 500;">${label === "Daily Batch" ? "The QC email did not go out. " : ""}Error:</div>
                   <div style="font-family: 'Roboto Mono', monospace; font-size: 12px; line-height: 18px; margin-top: 8px; word-break: break-word;">${escape(error?.message ?? error)}</div>
                 </td></tr>
               </table>
@@ -411,7 +412,7 @@ export function buildCrashEmailHtml(error, entries, targetDate = new Date()) {
           </tr>
           <tr>
             <td class="section" style="padding: 16px 24px 24px 24px; border-top: 1px solid ${M3.outlineVariant}; font-size: 12px; color: ${M3.outline}; text-align: center;">
-              findb-engine &bull; daily batch &bull; Cloud Run logs have the stack trace
+              findb-engine &bull; ${label.toLowerCase()} &bull; Cloud Run logs have the stack trace
             </td>
           </tr>
         </table>
