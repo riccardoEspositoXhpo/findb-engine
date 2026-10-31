@@ -1,0 +1,56 @@
+name: Nightly Database Backup
+
+# Full pg_dump of the production database to Cloud Storage (user, 2026-10-31): the undo button for a bad batch,
+# migration or delete (the free Supabase plan has no restorable backups). ~11 MB compressed, restores in seconds.
+# Rotation (lifecycle rules in .github/backup-lifecycle.json): daily/ 14 days, weekly/ (Sundays) 8 weeks,
+# monthly/ (the 1st) 12 months, yearly/ (1 January) forever, manual/ ("Run workflow" button) 30 days.
+on:
+  schedule:
+    - cron: "30 21 * * *" # 21:30 UTC = 22:30 CET / 23:30 CEST, after the ~21:00 batch
+  workflow_dispatch: # "Backup now", e.g. before a migration or a history rebuild
+
+env:
+  BUCKET: findb-engine-backups
+  PG_IMAGE: postgres:17-alpine # pg_dump must match the server (Supabase: Postgres 17)
+  MIN_SIZE_BYTES: 1000000 # a dump below 1 MB means something went wrong
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Dump the database
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          mkdir -p dump
+          # Custom format (compressed, selective restore); data + schema of public only, no Supabase roles / grants
+          docker run --rm -e DATABASE_URL -v "$PWD/dump:/out" "$PG_IMAGE" \
+            pg_dump "$DATABASE_URL" -Fc -Z 9 --no-owner --no-privileges -n public -f /out/findb.dump
+          size=$(stat -c %s dump/findb.dump)
+          echo "Dump size: $size bytes"
+          if [ "$size" -lt "$MIN_SIZE_BYTES" ]; then echo "::error::Dump too small ($size bytes)"; exit 1; fi
+          # The archive must be readable: list its table of contents
+          docker run --rm -v "$PWD/dump:/in" "$PG_IMAGE" pg_restore --list /in/findb.dump > dump/toc.txt
+          echo "Tables in the dump: $(grep -c 'TABLE DATA public' dump/toc.txt)"
+
+      - name: Upload to Cloud Storage
+        run: |
+          day=$(TZ=Europe/Rome date +%F)
+          name="findb-$day.dump"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            gcloud storage cp dump/findb.dump "gs://$BUCKET/manual/findb-$(TZ=Europe/Rome date +%F-%H%M).dump"
+            exit 0
+          fi
+          gcloud storage cp dump/findb.dump "gs://$BUCKET/daily/$name"
+          if [ "$(TZ=Europe/Rome date +%u)" = "7" ]; then gcloud storage cp dump/findb.dump "gs://$BUCKET/weekly/$name"; fi
+          if [ "$(TZ=Europe/Rome date +%d)" = "01" ]; then gcloud storage cp dump/findb.dump "gs://$BUCKET/monthly/$name"; fi
+          if [ "$(TZ=Europe/Rome date +%m%d)" = "0101" ]; then gcloud storage cp dump/findb.dump "gs://$BUCKET/yearly/$name"; fi
+          gcloud storage ls -l "gs://$BUCKET/**" | tail -n 5

@@ -238,3 +238,13 @@ User: nothing must ever stop the batch, and every failure must be reported. GAS 
 - Reporting: QC checks BL1 `checkBatchErrors` (CRITICAL) / BL2 `checkBatchWarnings` (WARNING) in the QC email; `sendCrashEmail` ("findb-engine: batch CRASHED [ACTION REQUIRED]", error + batch log) when QC can't run or its email fails, and from the top-level catch (batch dying outside the steps, e.g. database unreachable).
 - Tests: normal dry run 0 errors / 0 warnings; dry run with an empty CMC key + an injected risk crash -> crypto fx error and risk "crashed twice", every later step ran, QC CRITICAL (batch errors + hasCryptoRunToday + hasRiskRunToday).
 - Not done (user: later): a dead man's switch (healthchecks.io ping) for a job that never starts or can't email.
+
+## [BACKUPS] (2026-10-31)
+User: full nightly backup (the free Supabase plan has no restorable backups; GAS had Sheets version history). Ledger-only was considered and rejected: prices / fx of GAS / Allianz / Trustnet / old crypto and the navs of non-ROLL portfolios can't be re-derived, a rebuild with today's code isn't the old data, and the full dump is only 11 MB (inputs + positions 5 MB, ledger + inputs 1.8 MB).
+- `.github/workflows/backup.yml`: 21:30 UTC nightly + "Run workflow" button; `pg_dump` 17 in a postgres:17-alpine container (custom format, -Z 9, public schema, no owner / grants), size check (> 1 MB) + `pg_restore --list`, upload to `gs://findb-engine-backups/` (us-central1: the Cloud Storage always-free 5 GB is US-only; user).
+- Rotation (`.github/backup-lifecycle.json`, bucket lifecycle rules): daily/ 14 days, weekly/ (Sundays) 8 weeks, monthly/ (1st) 12 months, yearly/ (1 Jan) forever, manual/ 30 days. ~35 files, ~400 MB.
+- Needs: GitHub secret DATABASE_URL; the deploy service account (GCP_SA_KEY) with write access on the bucket. A failed run = GitHub's failed-workflow email.
+- Restore test (2026-10-31): full dump into a fresh Postgres 17 in 7 s, row counts identical; the only errors are the RLS policies naming Supabase's `authenticated` role (absent in plain Postgres, fine in Supabase).
+- Restore: `gcloud storage cp gs://findb-engine-backups/daily/findb-YYYY-MM-DD.dump .` then
+  `docker run --rm -e DATABASE_URL -v "$PWD:/in" postgres:17-alpine pg_restore -d "$DATABASE_URL" --clean --if-exists --no-owner --no-privileges /in/findb-YYYY-MM-DD.dump`
+  (one table only: add `-t <table> --data-only` after emptying it). Into production: take a manual backup first.

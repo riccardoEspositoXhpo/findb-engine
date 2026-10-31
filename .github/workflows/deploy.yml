@@ -31,7 +31,7 @@ jobs:
             --source . \
             --region ${{ env.REGION }} \
             --max-retries 1 \
-            --task-timeout 10m
+            --task-timeout 60m
 
       # Dry run (transaction rolled back) of the image just deployed: before the deploy it tested the old code
       - name: Test Cloud Run Job
